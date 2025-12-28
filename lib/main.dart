@@ -12,6 +12,7 @@ import 'package:iconsax/iconsax.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:uuid/uuid.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -80,6 +81,16 @@ class BookmarkItem {
   factory BookmarkItem.fromJson(Map<String, dynamic> json) => BookmarkItem(url: json['url'], title: json['title']);
 }
 
+class UserScript {
+  String id;
+  String name;
+  String code;
+  bool active;
+  UserScript({required this.id, required this.name, required this.code, this.active = true});
+  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'code': code, 'active': active};
+  factory UserScript.fromJson(Map<String, dynamic> json) => UserScript(id: json['id'], name: json['name'], code: json['code'], active: json['active']);
+}
+
 class DevToolsProvider extends ChangeNotifier {
   List<String> consoleLogs = [];
   void addLog(String message, ConsoleMessageLevel level) {
@@ -97,6 +108,7 @@ class BrowserProvider extends ChangeNotifier {
   List<HistoryItem> history = [];
   List<BookmarkItem> bookmarks = [];
   List<String> downloads = [];
+  List<UserScript> userScripts = []; // Script Injector
   
   // Settings
   String searchEngine = "https://www.google.com/search?q=";
@@ -105,11 +117,12 @@ class BrowserProvider extends ChangeNotifier {
   bool isAdBlockEnabled = true;
   bool isForceDarkWeb = false;
   bool isJsEnabled = true;
-  bool isImagesEnabled = true; // New: Data Saver
+  bool isImagesEnabled = true;
   bool isZenMode = false;
   
-  // Stats
+  // Stats & Performance
   int blockedAdsCount = 0;
+  bool showPerformanceOverlay = false;
   
   // Theme Engine
   Color neonColor = const Color(0xFF00FFC2);
@@ -126,10 +139,13 @@ class BrowserProvider extends ChangeNotifier {
   TextEditingController urlController = TextEditingController();
   TextEditingController findController = TextEditingController();
   stt.SpeechToText _speech = stt.SpeechToText();
+  FlutterTts _flutterTts = FlutterTts();
+  bool isSpeaking = false;
 
   BrowserProvider() {
     _loadData();
     _addNewTab();
+    _initTts();
   }
 
   BrowserTab get currentTab => tabs[currentTabIndex];
@@ -140,7 +156,7 @@ class BrowserProvider extends ChangeNotifier {
       mediaPlaybackRequiresUserGesture: false,
       allowsInlineMediaPlayback: true,
       javaScriptEnabled: isJsEnabled,
-      loadsImagesAutomatically: isImagesEnabled, // Data Saver Control
+      loadsImagesAutomatically: isImagesEnabled,
       cacheEnabled: !currentTab.isIncognito,
       domStorageEnabled: !currentTab.isIncognito,
       useWideViewPort: true,
@@ -150,6 +166,12 @@ class BrowserProvider extends ChangeNotifier {
           ? customUserAgent 
           : (isDesktopMode ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" : "")
     );
+  }
+
+  Future<void> _initTts() async {
+    await _flutterTts.setLanguage("en-US");
+    await _flutterTts.setSpeechRate(0.5);
+    _flutterTts.setCompletionHandler(() { isSpeaking = false; notifyListeners(); });
   }
 
   Future<void> _loadData() async {
@@ -164,13 +186,10 @@ class BrowserProvider extends ChangeNotifier {
     int? colorValue = prefs.getInt('neonColor');
     if (colorValue != null) neonColor = Color(colorValue);
 
-    final h = prefs.getStringList('history') ?? [];
-    history = h.map((e) => HistoryItem.fromJson(jsonDecode(e))).toList();
-    
-    final b = prefs.getStringList('bookmarks') ?? [];
-    bookmarks = b.map((e) => BookmarkItem.fromJson(jsonDecode(e))).toList();
-    
+    history = (prefs.getStringList('history') ?? []).map((e) => HistoryItem.fromJson(jsonDecode(e))).toList();
+    bookmarks = (prefs.getStringList('bookmarks') ?? []).map((e) => BookmarkItem.fromJson(jsonDecode(e))).toList();
     downloads = prefs.getStringList('downloads') ?? [];
+    userScripts = (prefs.getStringList('userScripts') ?? []).map((e) => UserScript.fromJson(jsonDecode(e))).toList();
     
     notifyListeners();
   }
@@ -187,6 +206,7 @@ class BrowserProvider extends ChangeNotifier {
     prefs.setStringList('history', history.map((e) => jsonEncode(e.toJson())).toList());
     prefs.setStringList('bookmarks', bookmarks.map((e) => jsonEncode(e.toJson())).toList());
     prefs.setStringList('downloads', downloads);
+    prefs.setStringList('userScripts', userScripts.map((e) => jsonEncode(e.toJson())).toList());
   }
 
   void changeTheme(Color color) { neonColor = color; _saveData(); notifyListeners(); }
@@ -253,122 +273,84 @@ class BrowserProvider extends ChangeNotifier {
   void toggleMenu() { isMenuOpen = !isMenuOpen; notifyListeners(); }
   void toggleZenMode() { isZenMode = !isZenMode; notifyListeners(); }
   void toggleAiSidebar() { showAiSidebar = !showAiSidebar; notifyListeners(); }
-
-  // --- FEATURES ---
   
+  // --- FEATURES ---
   void toggleBookmark() {
     if (currentTab.url == "neon://home") return;
     final index = bookmarks.indexWhere((b) => b.url == currentTab.url);
     if (index != -1) { bookmarks.removeAt(index); } else { bookmarks.insert(0, BookmarkItem(url: currentTab.url, title: currentTab.title)); }
     _saveData(); notifyListeners();
   }
-  
   bool isBookmarked() { return bookmarks.any((b) => b.url == currentTab.url); }
-
-  void addDownload(String filename) {
-    downloads.insert(0, "${DateTime.now().toString().substring(0,16)} - $filename");
-    _saveData();
-  }
-
-  void incrementAdsBlocked() {
-    blockedAdsCount++;
-    if (blockedAdsCount % 5 == 0) _saveData(); 
-    notifyListeners();
-  }
-
-  void findInPage(String text) {
-    if (text.isEmpty) { currentTab.controller?.clearMatches(); } else { currentTab.controller?.findAllAsync(find: text); }
-  }
+  void addDownload(String filename) { downloads.insert(0, "${DateTime.now().toString().substring(0,16)} - $filename"); _saveData(); }
+  void incrementAdsBlocked() { blockedAdsCount++; if (blockedAdsCount % 5 == 0) _saveData(); notifyListeners(); }
+  void findInPage(String text) { if (text.isEmpty) { currentTab.controller?.clearMatches(); } else { currentTab.controller?.findAllAsync(find: text); } }
   void findNext() => currentTab.controller?.findNext(forward: true);
   void findPrev() => currentTab.controller?.findNext(forward: false);
   void toggleFindBar() { showFindBar = !showFindBar; if (!showFindBar) currentTab.controller?.clearMatches(); notifyListeners(); }
-
-  void toggleReaderMode() {
-    String js = """(function(){var p=document.getElementsByTagName('p');var txt='';for(var i=0;i<p.length;i++)txt+='<p>'+p[i].innerHTML+'</p>';document.body.innerHTML='<div style="max-width:800px;margin:0 auto;padding:20px;font-family:sans-serif;line-height:1.6;color:#e0e0e0;background:#121212;">'+txt+'</div>';document.body.style.backgroundColor='#121212';})();""";
-    currentTab.controller?.evaluateJavascript(source: js);
-    toggleMenu();
-  }
-
+  void toggleReaderMode() { String js = """(function(){var p=document.getElementsByTagName('p');var txt='';for(var i=0;i<p.length;i++)txt+='<p>'+p[i].innerHTML+'</p>';document.body.innerHTML='<div style="max-width:800px;margin:0 auto;padding:20px;font-family:sans-serif;line-height:1.6;color:#e0e0e0;background:#121212;">'+txt+'</div>';document.body.style.backgroundColor='#121212';})();"""; currentTab.controller?.evaluateJavascript(source: js); toggleMenu(); }
   void toggleDesktopMode() async { isDesktopMode = !isDesktopMode; await currentTab.controller?.setSettings(settings: getSettings()); reload(); notifyListeners(); }
   void toggleAdBlock() async { isAdBlockEnabled = !isAdBlockEnabled; await _saveData(); reload(); notifyListeners(); }
   void toggleForceDark() async { isForceDarkWeb = !isForceDarkWeb; await _saveData(); reload(); notifyListeners(); }
   void toggleJs() async { isJsEnabled = !isJsEnabled; await _saveData(); await currentTab.controller?.setSettings(settings: getSettings()); reload(); notifyListeners(); }
   void toggleDataSaver() async { isImagesEnabled = !isImagesEnabled; await _saveData(); await currentTab.controller?.setSettings(settings: getSettings()); reload(); notifyListeners(); }
-  
   void setSearchEngine(String url) { searchEngine = url; _saveData(); notifyListeners(); }
   void clearData() async { await currentTab.controller?.clearCache(); await CookieManager.instance().deleteAllCookies(); history.clear(); downloads.clear(); await _saveData(); notifyListeners(); }
-
-  Future<void> savePageOffline(BuildContext context) async {
-    try {
-      final webArchive = await currentTab.controller?.saveWebArchive(basename: "saved_page", autoname: true);
-      if (webArchive != null) {
-        addDownload("Offline Archive: $webArchive");
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Page saved for offline reading")));
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to save page")));
-    }
+  
+  // --- USER SCRIPTS ---
+  void addUserScript(String name, String code) {
+    userScripts.add(UserScript(id: const Uuid().v4(), name: name, code: code));
+    _saveData(); notifyListeners();
+  }
+  void toggleUserScript(String id) {
+    final s = userScripts.firstWhere((e) => e.id == id);
+    s.active = !s.active;
+    _saveData(); reload(); notifyListeners();
+  }
+  void deleteUserScript(String id) {
+    userScripts.removeWhere((e) => e.id == id);
+    _saveData(); notifyListeners();
   }
 
-  Future<List<String>> sniffMedia() async {
-    // Inject JS to find video/audio tags
-    final result = await currentTab.controller?.evaluateJavascript(source: """
-      (function() {
-        var videos = document.getElementsByTagName('video');
-        var audios = document.getElementsByTagName('audio');
-        var links = [];
-        for(var i=0; i<videos.length; i++) { if(videos[i].src) links.push(videos[i].src); }
-        for(var i=0; i<audios.length; i++) { if(audios[i].src) links.push(audios[i].src); }
-        return links;
-      })();
-    """);
-    
-    if (result != null) {
-      List<dynamic> list = result;
-      return list.map((e) => e.toString()).toList();
+  // --- TTS ---
+  void toggleTts() async {
+    if (isSpeaking) {
+      await _flutterTts.stop();
+      isSpeaking = false;
+    } else {
+      // Get page text
+      final text = await currentTab.controller?.evaluateJavascript(source: "document.body.innerText");
+      if (text != null && text.toString().isNotEmpty) {
+        isSpeaking = true;
+        await _flutterTts.speak(text.toString());
+      }
     }
-    return [];
+    notifyListeners();
   }
 
   void injectScripts(InAppWebViewController c) {
+    // AdBlock
     if (isAdBlockEnabled) { 
       c.evaluateJavascript(source: """(function(){var blocked=0;var selectors=['.ad','.ads','.advertisement','iframe[src*="ads"]','[id^="google_ads"]'];selectors.forEach(s=>{var els=document.querySelectorAll(s);if(els.length>0){blocked+=els.length;els.forEach(e=>e.style.display='none');}});if(blocked>0)console.log("BLOCKED_ADS:"+blocked);})();"""); 
     }
+    // Force Dark
     if (isForceDarkWeb) { c.evaluateJavascript(source: """(function(){var style=document.createElement('style');style.innerHTML='html{filter:invert(1) hue-rotate(180deg) !important;}img,video,iframe,canvas{filter:invert(1) hue-rotate(180deg) !important;}';document.head.appendChild(style);})();"""); }
-  }
-
-  void startVoice(BuildContext context) async {
-    if (await Permission.microphone.request().isGranted && await _speech.initialize()) {
-      _speech.listen(onResult: (r) { if (r.finalResult) loadUrl(r.recognizedWords); });
-    }
-  }
-
-  void addToHistory(String url, String? title) {
-    if (!currentTab.isIncognito && url != "neon://home" && url != "about:blank" && url.isNotEmpty) {
-      if (history.isEmpty || history.first.url != url) {
-        history.insert(0, HistoryItem(url: url, title: title ?? "Unknown"));
-        if (history.length > 50) history.removeLast();
-        _saveData();
+    
+    // User Scripts
+    for (var script in userScripts) {
+      if (script.active) {
+        c.evaluateJavascript(source: "(function(){ try { ${script.code} } catch(e) { console.log('UserScript Error: ' + e); } })();");
       }
     }
   }
 
-  Future<void> viewSource(BuildContext context) async {
-    final html = await currentTab.controller?.getHtml();
-    if (html != null) Navigator.push(context, MaterialPageRoute(builder: (_) => SourceViewerPage(html: html)));
-  }
-
-  Future<void> shareScreenshot(BuildContext context) async {
-    try {
-      final image = await currentTab.controller?.takeScreenshot();
-      if (image == null) return;
-      final temp = await getTemporaryDirectory();
-      final file = File('${temp.path}/shot_${DateTime.now().millisecondsSinceEpoch}.png');
-      await file.writeAsBytes(image);
-      await Share.shareXFiles([XFile(file.path)]);
-    } catch (e) { /* ignore */ }
-  }
-
+  // ... (Other standard methods)
+  Future<void> savePageOffline(BuildContext context) async { try { final webArchive = await currentTab.controller?.saveWebArchive(basename: "saved_page", autoname: true); if (webArchive != null) { addDownload("Offline Archive: $webArchive"); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Page saved for offline reading"))); } } catch (e) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to save page"))); } }
+  Future<List<String>> sniffMedia() async { final result = await currentTab.controller?.evaluateJavascript(source: """(function(){var videos=document.getElementsByTagName('video');var audios=document.getElementsByTagName('audio');var links=[];for(var i=0;i<videos.length;i++){if(videos[i].src)links.push(videos[i].src);}for(var i=0;i<audios.length;i++){if(audios[i].src)links.push(audios[i].src);}return links;})();"""); if (result != null) { List<dynamic> list = result; return list.map((e) => e.toString()).toList(); } return []; }
+  void startVoice(BuildContext context) async { if (await Permission.microphone.request().isGranted && await _speech.initialize()) { _speech.listen(onResult: (r) { if (r.finalResult) loadUrl(r.recognizedWords); }); } }
+  void addToHistory(String url, String? title) { if (!currentTab.isIncognito && url != "neon://home" && url != "about:blank" && url.isNotEmpty) { if (history.isEmpty || history.first.url != url) { history.insert(0, HistoryItem(url: url, title: title ?? "Unknown")); if (history.length > 50) history.removeLast(); _saveData(); } } }
+  Future<void> viewSource(BuildContext context) async { final html = await currentTab.controller?.getHtml(); if (html != null) Navigator.push(context, MaterialPageRoute(builder: (_) => SourceViewerPage(html: html))); }
+  Future<void> shareScreenshot(BuildContext context) async { try { final image = await currentTab.controller?.takeScreenshot(); if (image == null) return; final temp = await getTemporaryDirectory(); final file = File('${temp.path}/shot_${DateTime.now().millisecondsSinceEpoch}.png'); await file.writeAsBytes(image); await Share.shareXFiles([XFile(file.path)]); } catch (e) { /* ignore */ } }
   void setCustomUA(String ua) async { customUserAgent = ua; await currentTab.controller?.setSettings(settings: getSettings()); currentTab.controller?.reload(); notifyListeners(); }
   void updateSSL(SslCertificate? ssl) { sslCertificate = ssl; notifyListeners(); }
   void goBack() => currentTab.controller?.goBack();
@@ -517,7 +499,6 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
             ),
           ),
 
-          // Find Bar
           if (browser.showFindBar)
              Positioned(bottom: browser.isZenMode ? 20 : 140, left: 20, right: 20, child: GlassBox(padding: const EdgeInsets.symmetric(horizontal: 10), child: Row(children: [
                  Expanded(child: TextField(controller: browser.findController, style: const TextStyle(color: Colors.white), decoration: const InputDecoration(hintText: "Find...", border: InputBorder.none, hintStyle: TextStyle(color: Colors.white30)), onChanged: (v) => browser.findInPage(v))),
@@ -558,7 +539,7 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
                     ),
                   ),
                   const SizedBox(width: 8),
-                  _circleBtn(Iconsax.magic_star, () => browser.toggleAiSidebar(), color: browser.neonColor),
+                  _circleBtn(browser.isSpeaking ? Icons.stop : Iconsax.magic_star, () => browser.isSpeaking ? browser.toggleTts() : browser.toggleAiSidebar(), color: browser.neonColor),
                 ],
               ),
             ),
@@ -583,10 +564,10 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
         _menuItem(Iconsax.arrow_right_3, "Fwd", b.goForward),
         _menuItem(Iconsax.refresh, "Reload", b.reload),
         _menuItem(Iconsax.scan_barcode, "Scan", () { b.toggleMenu(); Navigator.push(context, MaterialPageRoute(builder: (_) => const ScannerPage())); }),
+        _menuItem(Iconsax.code_circle, "Script", () { b.toggleMenu(); _showScriptManager(context, b); }),
+        _menuItem(Iconsax.volume_high, "Read", () { b.toggleTts(); b.toggleMenu(); }),
         _menuItem(Iconsax.video_circle, "Sniff", () => _showMediaSniffer(context, b)),
         _menuItem(Iconsax.document_download, "Files", () { b.toggleMenu(); _showDownloads(context, b); }),
-        _menuItem(Iconsax.save_2, "Save", () { b.toggleMenu(); b.savePageOffline(context); }),
-        _menuItem(Iconsax.data, "Data", b.toggleDataSaver, isActive: !b.isImagesEnabled),
         _menuItem(Iconsax.setting, "Settings", () { b.toggleMenu(); _showSettingsModal(context, b); }),
         _menuItem(Iconsax.home, "Home", () { b.loadUrl("neon://home"); b.toggleMenu(); }),
       ],
@@ -606,6 +587,55 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
 
   // --- MODALS ---
   
+  void _showScriptManager(BuildContext context, BrowserProvider b) {
+    showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), builder: (_) => StatefulBuilder(builder: (ctx, setState) {
+      return Container(height: 500, padding: const EdgeInsets.all(16), child: Column(children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          const Text("User Scripts", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+          IconButton(icon: const Icon(Icons.add, color: Colors.green), onPressed: () => _showAddScriptDialog(context, b, setState)),
+        ]),
+        const Divider(color: Colors.white24),
+        Expanded(child: b.userScripts.isEmpty 
+          ? const Center(child: Text("No scripts yet.", style: TextStyle(color: Colors.grey))) 
+          : ListView.builder(itemCount: b.userScripts.length, itemBuilder: (_, i) {
+              final s = b.userScripts[i];
+              return ListTile(
+                title: Text(s.name, style: const TextStyle(color: Colors.white)),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Switch(value: s.active, activeColor: b.neonColor, onChanged: (v) { b.toggleUserScript(s.id); setState((){}); }),
+                  IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () { b.deleteUserScript(s.id); setState((){}); })
+                ]),
+              );
+            })
+        ),
+      ]));
+    }));
+  }
+
+  void _showAddScriptDialog(BuildContext context, BrowserProvider b, StateSetter refreshParent) {
+    final nameCtrl = TextEditingController();
+    final codeCtrl = TextEditingController();
+    showDialog(context: context, builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF222222),
+      title: const Text("New Script", style: TextStyle(color: Colors.white)),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: nameCtrl, style: const TextStyle(color: Colors.white), decoration: const InputDecoration(hintText: "Script Name", hintStyle: TextStyle(color: Colors.grey))),
+        const SizedBox(height: 10),
+        TextField(controller: codeCtrl, style: const TextStyle(color: Colors.white, fontFamily: 'monospace'), maxLines: 5, decoration: const InputDecoration(hintText: "alert('Hello');", hintStyle: TextStyle(color: Colors.grey), border: OutlineInputBorder())),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        TextButton(onPressed: () { 
+          if(nameCtrl.text.isNotEmpty && codeCtrl.text.isNotEmpty) {
+            b.addUserScript(nameCtrl.text, codeCtrl.text);
+            refreshParent((){});
+            Navigator.pop(context);
+          }
+        }, child: Text("Save", style: TextStyle(color: b.neonColor))),
+      ],
+    ));
+  }
+
   void _showMediaSniffer(BuildContext context, BrowserProvider b) async {
     final media = await b.sniffMedia();
     showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), builder: (_) => SizedBox(height: 400, child: Column(children: [
@@ -681,7 +711,7 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
   void _showDevConsole(BuildContext context) { showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), builder: (_) => const DevConsoleSheet()); }
 }
 
-// ... (Classes like ScannerPage, TabGridPage, AiSidebar, StartPage, GlassBox, SearchSheet, DevConsoleSheet, SourceViewerPage remain same)
+// ... (Other standard pages like ScannerPage, TabGridPage, etc. remain unchanged)
 class ScannerPage extends StatelessWidget {
   const ScannerPage({super.key});
   @override
