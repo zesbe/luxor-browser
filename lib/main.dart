@@ -75,7 +75,8 @@ class DevToolsProvider extends ChangeNotifier {
 
   void addLog(String message, ConsoleMessageLevel level) {
     final timestamp = DateTime.now().toString().substring(11, 19);
-    consoleLogs.add("[$timestamp] ${level.name.toUpperCase()}: $message");
+    final levelName = level.toString().split('.').last.toUpperCase();
+    consoleLogs.add("[$timestamp] $levelName: $message");
     notifyListeners();
   }
 
