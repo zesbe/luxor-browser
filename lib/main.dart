@@ -1,10 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path_provider/path_provider.dart';
@@ -23,6 +21,7 @@ void main() {
       providers: [
         ChangeNotifierProvider(create: (_) => BrowserProvider()),
         ChangeNotifierProvider(create: (_) => AiAgentProvider()),
+        ChangeNotifierProvider(create: (_) => DevToolsProvider()),
       ],
       child: const AiBrowserApp(),
     ),
@@ -35,15 +34,15 @@ class AiBrowserApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Neon AI Browser Real',
+      title: 'Neon AI Browser Ultra',
       theme: ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF050505),
+        scaffoldBackgroundColor: Colors.black,
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF00FFC2),
-          secondary: Color(0xFFD500F9),
-          surface: Color(0xFF1E1E1E),
+          primary: Color(0xFF00FFC2), // Cyan
+          secondary: Color(0xFFFF0055), // Neon Red
+          surface: Color(0xFF121212),
         ),
       ),
       home: const BrowserHomePage(),
@@ -52,17 +51,7 @@ class AiBrowserApp extends StatelessWidget {
   }
 }
 
-// --- LOGIC CORE ---
-
-class HistoryItem {
-  final String url;
-  final String title;
-  final DateTime date;
-  HistoryItem({required this.url, required this.title, required this.date});
-  Map<String, dynamic> toJson() => {'url': url, 'title': title, 'date': date.toIso8601String()};
-  factory HistoryItem.fromJson(Map<String, dynamic> json) => HistoryItem(
-    url: json['url'], title: json['title'], date: DateTime.parse(json['date']));
-}
+// --- PROVIDERS & LOGIC ---
 
 class BrowserTab {
   final String id;
@@ -73,6 +62,29 @@ class BrowserTab {
   BrowserTab({required this.id, this.url = "https://www.google.com", this.title = "New Tab", this.isIncognito = false});
 }
 
+class HistoryItem {
+  final String url, title;
+  HistoryItem({required this.url, required this.title});
+  Map<String, dynamic> toJson() => {'url': url, 'title': title};
+  factory HistoryItem.fromJson(Map<String, dynamic> json) => HistoryItem(url: json['url'], title: json['title']);
+}
+
+class DevToolsProvider extends ChangeNotifier {
+  List<String> consoleLogs = [];
+  bool isDevMode = false;
+
+  void addLog(String message, ConsoleMessageLevel level) {
+    final timestamp = DateTime.now().toString().substring(11, 19);
+    consoleLogs.add("[$timestamp] ${level.name.toUpperCase()}: $message");
+    notifyListeners();
+  }
+
+  void clearLogs() {
+    consoleLogs.clear();
+    notifyListeners();
+  }
+}
+
 class BrowserProvider extends ChangeNotifier {
   List<BrowserTab> tabs = [];
   int currentTabIndex = 0;
@@ -80,18 +92,17 @@ class BrowserProvider extends ChangeNotifier {
   
   // Settings
   String searchEngine = "https://www.google.com/search?q=";
+  String customUserAgent = "";
   bool isDesktopMode = false;
   bool isAdBlockEnabled = true;
   bool isZenMode = false;
   
   // State
   double progress = 0;
-  bool isLoading = false;
   bool isSecure = true;
-  bool isMenuOpen = false;
+  bool isMenuOpen = false; // Toggles the quick menu
   TextEditingController urlController = TextEditingController();
   stt.SpeechToText _speech = stt.SpeechToText();
-  bool _isListening = false;
 
   BrowserProvider() {
     _loadData();
@@ -110,9 +121,9 @@ class BrowserProvider extends ChangeNotifier {
       useWideViewPort: true,
       safeBrowsingEnabled: true,
       mixedContentMode: MixedContentMode.MIXED_CONTENT_COMPATIBILITY_MODE,
-      userAgent: isDesktopMode
-          ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          : ""
+      userAgent: customUserAgent.isNotEmpty 
+          ? customUserAgent 
+          : (isDesktopMode ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" : "")
     );
   }
 
@@ -120,8 +131,8 @@ class BrowserProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     searchEngine = prefs.getString('searchEngine') ?? "https://www.google.com/search?q=";
     isAdBlockEnabled = prefs.getBool('adBlock') ?? true;
-    final historyList = prefs.getStringList('history') ?? [];
-    history = historyList.map((e) => HistoryItem.fromJson(jsonDecode(e))).toList();
+    final h = prefs.getStringList('history') ?? [];
+    history = h.map((e) => HistoryItem.fromJson(jsonDecode(e))).toList();
     notifyListeners();
   }
 
@@ -136,13 +147,7 @@ class BrowserProvider extends ChangeNotifier {
     final newTab = BrowserTab(id: const Uuid().v4(), url: url, isIncognito: incognito);
     tabs.add(newTab);
     currentTabIndex = tabs.length - 1;
-    _updateCurrentTabState();
-    notifyListeners();
-  }
-
-  void switchTab(int index) {
-    currentTabIndex = index;
-    _updateCurrentTabState();
+    _updateState();
     notifyListeners();
   }
 
@@ -150,21 +155,24 @@ class BrowserProvider extends ChangeNotifier {
     if (tabs.length > 1) {
       tabs.removeAt(index);
       if (currentTabIndex >= tabs.length) currentTabIndex = tabs.length - 1;
-      _updateCurrentTabState();
+      _updateState();
       notifyListeners();
     }
   }
 
-  void _updateCurrentTabState() {
+  void switchTab(int index) {
+    currentTabIndex = index;
+    _updateState();
+    notifyListeners();
+  }
+
+  void _updateState() {
     urlController.text = currentTab.url;
     isSecure = currentTab.url.startsWith("https://");
-    isLoading = false;
     progress = 0;
   }
 
-  void setController(InAppWebViewController controller) {
-    currentTab.controller = controller;
-  }
+  void setController(InAppWebViewController c) => currentTab.controller = c;
 
   void updateUrl(String url) {
     currentTab.url = url;
@@ -173,25 +181,11 @@ class BrowserProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> addToHistory(String url, String? title) async {
-    if (currentTab.isIncognito || url == "about:blank" || url.isEmpty) return;
-    if (history.isNotEmpty && history.first.url == url) return;
-
-    history.insert(0, HistoryItem(url: url, title: title ?? "Unknown", date: DateTime.now()));
-    if (history.length > 100) history.removeLast();
-    _saveData();
-  }
-
   void loadUrl(String url) {
     if (!url.startsWith("http")) {
-      if (url.contains(".") && !url.contains(" ")) {
-        url = "https://$url";
-      } else {
-        url = "$searchEngine$url";
-      }
+      url = (url.contains(".") && !url.contains(" ")) ? "https://$url" : "$searchEngine$url";
     }
     currentTab.controller?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
-    isMenuOpen = false;
     notifyListeners();
   }
 
@@ -199,7 +193,7 @@ class BrowserProvider extends ChangeNotifier {
     isMenuOpen = !isMenuOpen;
     notifyListeners();
   }
-  
+
   void toggleZenMode() {
     isZenMode = !isZenMode;
     notifyListeners();
@@ -208,73 +202,62 @@ class BrowserProvider extends ChangeNotifier {
   void toggleDesktopMode() async {
     isDesktopMode = !isDesktopMode;
     await currentTab.controller?.setSettings(settings: getSettings());
-    reload();
+    currentTab.controller?.reload();
     notifyListeners();
   }
 
-  void toggleAdBlock() async {
-    isAdBlockEnabled = !isAdBlockEnabled;
-    await _saveData();
-    reload();
+  void setCustomUA(String ua) async {
+    customUserAgent = ua;
+    await currentTab.controller?.setSettings(settings: getSettings());
+    currentTab.controller?.reload();
     notifyListeners();
   }
 
-  void setSearchEngine(String url) {
-    searchEngine = url;
-    _saveData();
-    notifyListeners();
-  }
-
-  void clearData() async {
-    await currentTab.controller?.clearCache();
-    await CookieManager.instance().deleteAllCookies();
-    history.clear();
-    await _saveData();
-    notifyListeners();
+  Future<void> viewSource(BuildContext context) async {
+    final html = await currentTab.controller?.getHtml();
+    if (html != null) {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => SourceViewerPage(html: html)));
+    }
   }
 
   Future<void> shareScreenshot(BuildContext context) async {
     try {
       final image = await currentTab.controller?.takeScreenshot();
-      if (image == null) throw Exception("Capture failed");
-      final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/snap_${DateTime.now().millisecondsSinceEpoch}.png');
+      if (image == null) return;
+      final temp = await getTemporaryDirectory();
+      final file = File('${temp.path}/shot_${DateTime.now().millisecondsSinceEpoch}.png');
       await file.writeAsBytes(image);
-      await Share.shareXFiles([XFile(file.path)], text: 'Snap from Neon Browser');
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
-    }
+      await Share.shareXFiles([XFile(file.path)]);
+    } catch (e) { /* ignore */ }
   }
 
-  void injectScripts(InAppWebViewController controller) {
+  void injectScripts(InAppWebViewController c) {
     if (isAdBlockEnabled) {
-      String js = """
+      c.evaluateJavascript(source: """
         (function() {
-          var css = '.ad, .ads, .advertisement, [id^="google_ads"], iframe[src*="ads"], div[class*="sponsored"] { display: none !important; visibility: hidden !important; height: 0 !important; }';
           var style = document.createElement('style');
-          style.type = 'text/css';
-          style.appendChild(document.createTextNode(css));
+          style.innerHTML = '.ad, .ads, .advertisement, iframe[src*="ads"], [id^="google_ads"] { display: none !important; }';
           document.head.appendChild(style);
         })();
-      """;
-      controller.evaluateJavascript(source: js);
+      """);
     }
   }
 
-  void startVoiceSearch(BuildContext context) async {
-    var status = await Permission.microphone.request();
-    if (status.isGranted && await _speech.initialize()) {
-      _isListening = true;
-      notifyListeners();
-      _speech.listen(onResult: (result) {
-        if (result.finalResult) {
-          _isListening = false;
-          loadUrl(result.recognizedWords);
-          notifyListeners();
-        }
+  void startVoice(BuildContext context) async {
+    if (await Permission.microphone.request().isGranted && await _speech.initialize()) {
+      _speech.listen(onResult: (r) {
+        if (r.finalResult) loadUrl(r.recognizedWords);
       });
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Mic Permission Denied")));
+    }
+  }
+
+  void addToHistory(String url, String? title) {
+    if (!currentTab.isIncognito && url != "about:blank" && url.isNotEmpty) {
+      if (history.isEmpty || history.first.url != url) {
+        history.insert(0, HistoryItem(url: url, title: title ?? "Unknown"));
+        if (history.length > 50) history.removeLast();
+        _saveData();
+      }
     }
   }
 
@@ -284,44 +267,18 @@ class BrowserProvider extends ChangeNotifier {
 }
 
 class AiAgentProvider extends ChangeNotifier {
-  List<ChatMessage> messages = [ChatMessage(text: "Browser Command Interface Online.\nTry 'Go to Google' or 'Switch to Desktop'.", isUser: false)];
+  List<ChatMessage> messages = [ChatMessage(text: "Ready.", isUser: false)];
   bool isThinking = false;
-
-  void sendMessage(String text, BrowserProvider browser) async {
+  void sendMessage(String text, BrowserProvider b) async {
     messages.add(ChatMessage(text: text, isUser: true));
-    isThinking = true;
-    notifyListeners();
-    await Future.delayed(const Duration(seconds: 1));
-    
-    String response = "Command processed.";
-    String lower = text.toLowerCase();
-    
-    // REAL COMMAND PARSING
-    if (lower.contains("google")) {
-      browser.loadUrl("https://google.com");
-      response = "Navigating to Google.";
-    } else if (lower.contains("youtube")) {
-      browser.loadUrl("https://youtube.com");
-      response = "Opening YouTube.";
-    } else if (lower.contains("desktop")) {
-      browser.toggleDesktopMode();
-      response = "Desktop Mode ${browser.isDesktopMode ? "Activated" : "Deactivated"}.";
-    } else if (lower.contains("adblock")) {
-      browser.toggleAdBlock();
-      response = "AdBlock ${browser.isAdBlockEnabled ? "Active" : "Disabled"}.";
-    } else if (lower.contains("clear") || lower.contains("delete")) {
-      browser.clearData();
-      response = "Browsing data wiped.";
-    } else if (lower.contains("incognito") || lower.contains("private")) {
-      browser._addNewTab("https://google.com", true);
-      response = "New Private Tab opened.";
-    } else {
-      response = "I can browse, change settings, or secure data. Be specific.";
-    }
-    
-    messages.add(ChatMessage(text: response, isUser: false));
-    isThinking = false;
-    notifyListeners();
+    isThinking = true; notifyListeners();
+    await Future.delayed(const Duration(milliseconds: 600)); // Fast response
+    String resp = "OK.";
+    if (text.contains("desktop")) { b.toggleDesktopMode(); resp = "Desktop Mode Toggled."; }
+    else if (text.contains("source")) { resp = "Use the Tools menu to view source."; }
+    else { resp = "I can control settings or search for you."; }
+    messages.add(ChatMessage(text: resp, isUser: false));
+    isThinking = false; notifyListeners();
   }
 }
 
@@ -331,35 +288,7 @@ class ChatMessage {
   ChatMessage({required this.text, required this.isUser});
 }
 
-// --- UI COMPONENTS ---
-
-class GlassContainer extends StatelessWidget {
-  final Widget child;
-  final double blur;
-  final double opacity;
-  final Color color;
-  final BorderRadius? borderRadius;
-
-  const GlassContainer({super.key, required this.child, this.blur = 10, this.opacity = 0.2, this.color = Colors.black, this.borderRadius});
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: borderRadius ?? BorderRadius.circular(20),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-        child: Container(
-          decoration: BoxDecoration(
-            color: color.withOpacity(opacity),
-            borderRadius: borderRadius ?? BorderRadius.circular(20),
-            border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
-          ),
-          child: child,
-        ),
-      ),
-    );
-  }
-}
+// --- PAGES & WIDGETS ---
 
 class BrowserHomePage extends StatefulWidget {
   const BrowserHomePage({super.key});
@@ -368,324 +297,331 @@ class BrowserHomePage extends StatefulWidget {
 }
 
 class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderStateMixin {
-  late AnimationController _pulseController;
+  late AnimationController _menuController;
+  late Animation<double> _menuScale;
 
   @override
   void initState() {
     super.initState();
-    _pulseController = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _pulseController.dispose();
-    super.dispose();
+    _menuController = AnimationController(vsync: this, duration: const Duration(milliseconds: 150));
+    _menuScale = CurvedAnimation(parent: _menuController, curve: Curves.easeOutBack);
   }
 
   @override
   Widget build(BuildContext context) {
     final browser = Provider.of<BrowserProvider>(context);
+    final devTools = Provider.of<DevToolsProvider>(context);
+    
+    // Sync Animation with Provider State
+    if (browser.isMenuOpen && _menuController.status != AnimationStatus.completed) {
+      _menuController.forward();
+    } else if (!browser.isMenuOpen && _menuController.status != AnimationStatus.dismissed) {
+      _menuController.reverse();
+    }
 
     return Scaffold(
+      resizeToAvoidBottomInset: false, // Prevent webview resize on keyboard
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          Positioned.fill(
-            child: InAppWebView(
-              key: ValueKey(browser.currentTab.id),
-              initialUrlRequest: URLRequest(url: WebUri(browser.currentTab.url)),
-              initialSettings: browser.getSettings(),
-              onWebViewCreated: (c) => browser.setController(c),
-              onLoadStart: (c, url) => browser.updateUrl(url.toString()),
-              onLoadStop: (c, url) async {
-                browser.progress = 1.0;
-                browser.updateUrl(url.toString());
-                browser.injectScripts(c);
-                browser.addToHistory(url.toString(), await c.getTitle());
-              },
-              onProgressChanged: (c, p) => browser.progress = p / 100,
+          // 1. WebView
+          Column(
+            children: [
+              Expanded(
+                child: InAppWebView(
+                  key: ValueKey(browser.currentTab.id),
+                  initialUrlRequest: URLRequest(url: WebUri(browser.currentTab.url)),
+                  initialSettings: browser.getSettings(),
+                  onWebViewCreated: (c) => browser.setController(c),
+                  onLoadStart: (c, url) => browser.updateUrl(url.toString()),
+                  onLoadStop: (c, url) async {
+                    browser.progress = 1.0;
+                    browser.updateUrl(url.toString());
+                    browser.injectScripts(c);
+                    browser.addToHistory(url.toString(), await c.getTitle());
+                  },
+                  onProgressChanged: (c, p) => browser.progress = p / 100,
+                  onConsoleMessage: (c, msg) => devTools.addLog(msg.message, msg.messageLevel),
+                ),
+              ),
+              // Space for Floating Bar (so web content isn't covered if scrolled to bottom)
+              if (!browser.isZenMode) const SizedBox(height: 80), 
+            ],
+          ),
+
+          // 2. Loading Bar (Top)
+          if (browser.progress < 1.0)
+            Positioned(top: 0, left: 0, right: 0, child: LinearProgressIndicator(value: browser.progress, minHeight: 2, color: const Color(0xFF00FFC2), backgroundColor: Colors.transparent)),
+
+          // 3. Floating Menu (Separate Layer for Performance)
+          Positioned(
+            bottom: 90, // Just above the capsule
+            left: 20, right: 20,
+            child: ScaleTransition(
+              scale: _menuScale,
+              alignment: Alignment.bottomCenter,
+              child: GlassBox(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildGridMenu(context, browser),
+                    const Divider(color: Colors.white10),
+                    _buildTabStrip(browser),
+                  ],
+                ),
+              ),
             ),
           ),
-          if (browser.progress < 1.0)
-            Positioned(
-              top: 0, left: 0, right: 0,
-              child: LinearProgressIndicator(value: browser.progress, minHeight: 3, color: Theme.of(context).colorScheme.primary, backgroundColor: Colors.transparent),
-            ),
+
+          // 4. Control Capsule (Always Visible, Static Position)
           AnimatedPositioned(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            bottom: browser.isZenMode ? -150 : 30,
+            duration: const Duration(milliseconds: 200),
+            bottom: browser.isZenMode ? -100 : 20,
             left: 20, right: 20,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AnimatedSize(
-                  duration: const Duration(milliseconds: 300),
-                  child: browser.isMenuOpen 
-                    ? Container(
-                        margin: const EdgeInsets.only(bottom: 16),
-                        child: GlassContainer(
-                          blur: 15, opacity: 0.8, color: const Color(0xFF121212),
-                          child: Padding(
-                            padding: const EdgeInsets.all(16.0),
-                            child: Column(children: [_buildGridMenu(context, browser), const SizedBox(height: 12), _buildTabStrip(browser)]),
-                          ),
+            child: GlassBox(
+              borderRadius: 50,
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
+              child: Row(
+                children: [
+                  _circleBtn(browser.isMenuOpen ? Icons.close : Iconsax.category, () => browser.toggleMenu()),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => _showSearch(context, browser),
+                      child: Container(
+                        height: 40,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: BoxDecoration(color: Colors.white.withOpacity(0.08), borderRadius: BorderRadius.circular(20)),
+                        alignment: Alignment.centerLeft,
+                        child: Row(
+                          children: [
+                            Icon(browser.isSecure ? Iconsax.lock5 : Iconsax.unlock, size: 12, color: browser.isSecure ? Colors.green : Colors.red),
+                            const SizedBox(width: 8),
+                            Expanded(child: Text(browser.currentTab.url.replaceFirst("https://", ""), style: const TextStyle(color: Colors.white70, fontSize: 13), overflow: TextOverflow.ellipsis)),
+                          ],
                         ),
-                      )
-                    : const SizedBox.shrink(),
-                ),
-                GlassContainer(
-                  blur: 20, opacity: 0.6, color: Colors.black, borderRadius: BorderRadius.circular(30),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                    child: Row(
-                      children: [
-                        IconButton(icon: Icon(browser.isMenuOpen ? Icons.close : Iconsax.category, color: Colors.white), onPressed: browser.toggleMenu),
-                        Expanded(
-                          child: GestureDetector(
-                            onTap: () => _showSearchModal(context, browser),
-                            child: Container(
-                              height: 40, padding: const EdgeInsets.symmetric(horizontal: 16),
-                              decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(20)),
-                              alignment: Alignment.centerLeft,
-                              child: Row(
-                                children: [
-                                  if (browser.currentTab.isIncognito) const Padding(padding: EdgeInsets.only(right: 8), child: Icon(Iconsax.mask, size: 14, color: Colors.purpleAccent)),
-                                  Icon(browser.isSecure ? Iconsax.lock5 : Iconsax.unlock, size: 12, color: browser.isSecure ? Colors.greenAccent : Colors.redAccent),
-                                  const SizedBox(width: 8),
-                                  Expanded(child: Text(browser.currentTab.url.replaceFirst("https://", ""), style: const TextStyle(color: Colors.white70, fontSize: 13), overflow: TextOverflow.ellipsis)),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: () => showModalBottomSheet(context: context, backgroundColor: Colors.transparent, isScrollControlled: true, builder: (_) => const AiAgentPanel()),
-                          child: AnimatedBuilder(
-                            animation: _pulseController,
-                            builder: (context, child) => Container(
-                              width: 44, height: 44,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                gradient: LinearGradient(colors: [Theme.of(context).colorScheme.primary, Theme.of(context).colorScheme.secondary]),
-                                boxShadow: [BoxShadow(color: Theme.of(context).colorScheme.primary.withOpacity(0.5 * _pulseController.value), blurRadius: 10 + (10 * _pulseController.value))]
-                              ),
-                              child: const Icon(Iconsax.magic_star, color: Colors.black, size: 24),
-                            ),
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 8),
+                  _circleBtn(Iconsax.magic_star, () => _showAI(context), color: const Color(0xFF00FFC2)),
+                ],
+              ),
             ),
           ),
+          
+          // 5. Zen Mode Trigger
           if (browser.isZenMode)
-            Positioned(
-              bottom: 20, right: 20,
-              child: FloatingActionButton.small(backgroundColor: Colors.white.withOpacity(0.2), elevation: 0, child: const Icon(Icons.expand_less, color: Colors.white), onPressed: browser.toggleZenMode),
-            ),
+            Positioned(bottom: 20, right: 20, child: FloatingActionButton.small(backgroundColor: Colors.white10, child: const Icon(Icons.expand_less, color: Colors.white), onPressed: browser.toggleZenMode)),
         ],
       ),
     );
   }
 
-  Widget _buildGridMenu(BuildContext context, BrowserProvider browser) {
-    // Definisi tombol menu dengan feedback langsung
-    final items = [
-      {'icon': Iconsax.arrow_left_2, 'label': 'Back', 'action': () { browser.goBack(); }},
-      {'icon': Iconsax.arrow_right_3, 'label': 'Forward', 'action': () { browser.goForward(); }},
-      {'icon': Iconsax.refresh, 'label': 'Reload', 'action': () { browser.reload(); }},
-      {'icon': Iconsax.add, 'label': 'New Tab', 'action': () { browser._addNewTab(); browser.toggleMenu(); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("New Tab Opened"), duration: Duration(milliseconds: 500))); }},
-      {'icon': Iconsax.mask, 'label': 'Incognito', 'action': () { browser._addNewTab("https://google.com", true); browser.toggleMenu(); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Incognito Mode"), duration: Duration(milliseconds: 500))); }},
-      {'icon': Iconsax.monitor, 'label': 'Desktop', 'action': () { browser.toggleDesktopMode(); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Desktop Mode ${browser.isDesktopMode ? "ON" : "OFF"}"), duration: const Duration(milliseconds: 500))); }},
-      {'icon': Iconsax.camera, 'label': 'Snap', 'action': () { browser.shareScreenshot(context); browser.toggleMenu(); }},
-      {'icon': Iconsax.clock, 'label': 'History', 'action': () { _showHistoryModal(context, browser); }},
-      {'icon': Iconsax.eye_slash, 'label': 'Zen Mode', 'action': () { browser.toggleZenMode(); browser.toggleMenu(); }},
-      {'icon': Iconsax.setting, 'label': 'Settings', 'action': () { _showSettingsModal(context, browser); }},
-    ];
-
-    return GridView.builder(
-      shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 5, mainAxisSpacing: 16, crossAxisSpacing: 8),
-      itemCount: items.length,
-      itemBuilder: (context, index) {
-        final item = items[index];
-        bool isActive = false;
-        if (item['label'] == 'Desktop') isActive = browser.isDesktopMode;
-
-        return InkWell(
-          onTap: item['action'] as VoidCallback,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: isActive ? Theme.of(context).colorScheme.primary : Colors.white.withOpacity(0.1), shape: BoxShape.circle),
-                child: Icon(item['icon'] as IconData, color: Colors.white, size: 20),
-              ),
-              const SizedBox(height: 4),
-              Text(item['label'] as String, style: const TextStyle(color: Colors.white70, fontSize: 9), textAlign: TextAlign.center),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildTabStrip(BrowserProvider browser) {
-    return SizedBox(
-      height: 40,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: browser.tabs.length,
-        separatorBuilder: (_,__) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final tab = browser.tabs[index];
-          final isActive = index == browser.currentTabIndex;
-          return GestureDetector(
-            onTap: () => browser.switchTab(index),
-            child: Container(
-              width: 100, padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                color: isActive ? Theme.of(context).colorScheme.primary.withOpacity(0.2) : Colors.white.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(15),
-                border: isActive ? Border.all(color: Theme.of(context).colorScheme.primary.withOpacity(0.5)) : null,
-              ),
-              alignment: Alignment.centerLeft,
-              child: Row(
-                children: [
-                  if (tab.isIncognito) const Padding(padding: EdgeInsets.only(right: 4), child: Icon(Iconsax.mask, size: 10, color: Colors.purpleAccent)),
-                  Expanded(child: Text(tab.title, style: TextStyle(color: isActive ? Colors.white : Colors.white54, fontSize: 10), overflow: TextOverflow.ellipsis)),
-                  GestureDetector(onTap: () => browser.closeTab(index), child: const Icon(Icons.close, size: 12, color: Colors.white30))
-                ],
-              ),
-            ),
-          );
-        },
+  Widget _circleBtn(IconData icon, VoidCallback onTap, {Color color = Colors.white}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(50),
+      child: Container(
+        width: 44, height: 44,
+        alignment: Alignment.center,
+        decoration: const BoxDecoration(shape: BoxShape.circle),
+        child: Icon(icon, color: color, size: 22),
       ),
     );
   }
 
-  void _showHistoryModal(BuildContext context, BrowserProvider browser) {
-    showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), builder: (_) => SizedBox(height: 400, child: Column(children: [
-      const Padding(padding: EdgeInsets.all(16), child: Text("History", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
-      Expanded(child: ListView.builder(itemCount: browser.history.length, itemBuilder: (_, i) {
-        final item = browser.history[i];
-        return ListTile(title: Text(item.title, style: const TextStyle(color: Colors.white), maxLines: 1), subtitle: Text(item.url, style: const TextStyle(color: Colors.grey), maxLines: 1), onTap: () { browser.loadUrl(item.url); Navigator.pop(context); browser.isMenuOpen = false; });
-      })),
-      TextButton(onPressed: () { browser.clearData(); Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("History Cleared"))); }, child: const Text("Clear All Data", style: TextStyle(color: Colors.red)))
-    ])));
-  }
-
-  void _showSettingsModal(BuildContext context, BrowserProvider browser) {
-    showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), builder: (_) => StatefulBuilder(builder: (ctx, setState) => SizedBox(height: 350, child: ListView(padding: const EdgeInsets.all(16), children: [
-      const Text("Settings", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-      const Divider(color: Colors.white24),
-      SwitchListTile(title: const Text("AdBlock", style: TextStyle(color: Colors.white)), value: browser.isAdBlockEnabled, onChanged: (v) { browser.toggleAdBlock(); setState((){}); }),
-      ListTile(title: const Text("Search Engine", style: TextStyle(color: Colors.white)), subtitle: Text(browser.searchEngine.contains("google") ? "Google" : "DuckDuckGo", style: const TextStyle(color: Colors.grey)), onTap: () {
-        browser.setSearchEngine(browser.searchEngine.contains("google") ? "https://duckduckgo.com/?q=" : "https://www.google.com/search?q=");
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Engine: ${browser.searchEngine.contains("google") ? "Google" : "DuckDuckGo"}")));
-      }),
-    ]))));
-  }
-
-  void _showSearchModal(BuildContext context, BrowserProvider browser) {
-    showModalBottomSheet(
-      context: context, isScrollControlled: true, backgroundColor: Colors.transparent,
-      builder: (context) {
-        return Container(
-          height: MediaQuery.of(context).size.height * 0.9, padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(color: const Color(0xFF101010), borderRadius: const BorderRadius.vertical(top: Radius.circular(30))),
-          child: Column(
-            children: [
-              const SizedBox(height: 10),
-              TextField(
-                controller: browser.urlController, autofocus: true, style: const TextStyle(fontSize: 18, color: Colors.white),
-                decoration: InputDecoration(
-                  hintText: "Search or type URL", hintStyle: const TextStyle(color: Colors.white30),
-                  prefixIcon: const Icon(Iconsax.search_normal, color: Colors.white54),
-                  filled: true, fillColor: Colors.white.withOpacity(0.1),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
-                  suffixIcon: IconButton(icon: const Icon(Iconsax.microphone), onPressed: () { browser.startVoiceSearch(context); Navigator.pop(context); }),
-                ),
-                onSubmitted: (value) { browser.loadUrl(value); Navigator.pop(context); },
-              ),
-              const SizedBox(height: 20),
-              Wrap(spacing: 10, runSpacing: 10, children: [
-                _quickChip(browser, "Google", "google.com", Icons.search, context),
-                _quickChip(browser, "YouTube", "youtube.com", Iconsax.video, context),
-                _quickChip(browser, "News", "cnn.com", Iconsax.global, context),
-                _quickChip(browser, "ChatGPT", "chat.openai.com", Iconsax.message, context),
-              ])
-            ],
-          ),
-        );
-      },
+  Widget _buildGridMenu(BuildContext context, BrowserProvider b) {
+    return GridView.count(
+      shrinkWrap: true, crossAxisCount: 5, mainAxisSpacing: 15, crossAxisSpacing: 10,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(16),
+      children: [
+        _menuItem(Iconsax.arrow_left_2, "Back", b.goBack),
+        _menuItem(Iconsax.arrow_right_3, "Fwd", b.goForward),
+        _menuItem(Iconsax.refresh, "Reload", b.reload),
+        _menuItem(Iconsax.add, "New", () { b._addNewTab(); b.toggleMenu(); }),
+        _menuItem(Iconsax.mask, "Private", () { b._addNewTab("https://google.com", true); b.toggleMenu(); }),
+        _menuItem(Iconsax.monitor, "Desktop", b.toggleDesktopMode, isActive: b.isDesktopMode),
+        _menuItem(Iconsax.code, "Source", () { b.toggleMenu(); b.viewSource(context); }),
+        _menuItem(Iconsax.command, "Console", () { b.toggleMenu(); _showDevConsole(context); }),
+        _menuItem(Iconsax.mobile, "UA", () { b.toggleMenu(); _showUAPicker(context, b); }),
+        _menuItem(Iconsax.setting, "Settings", () { }),
+      ],
     );
   }
 
-  Widget _quickChip(BrowserProvider b, String label, String url, IconData icon, BuildContext ctx) {
-    return ActionChip(
-      avatar: Icon(icon, size: 14, color: Colors.white),
-      label: Text(label), backgroundColor: Colors.white.withOpacity(0.1),
-      labelStyle: const TextStyle(color: Colors.white), side: BorderSide.none,
-      onPressed: () { b.loadUrl(url); Navigator.pop(ctx); },
+  Widget _menuItem(IconData icon, String label, VoidCallback onTap, {bool isActive = false}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(color: isActive ? const Color(0xFF00FFC2) : Colors.white10, shape: BoxShape.circle),
+            child: Icon(icon, size: 18, color: isActive ? Colors.black : Colors.white),
+          ),
+          const SizedBox(height: 5),
+          Text(label, style: const TextStyle(fontSize: 10, color: Colors.white70), maxLines: 1),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTabStrip(BrowserProvider b) {
+    return Container(
+      height: 40, margin: const EdgeInsets.only(bottom: 10),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal, itemCount: b.tabs.length, padding: const EdgeInsets.symmetric(horizontal: 10),
+        itemBuilder: (ctx, i) => GestureDetector(
+          onTap: () => b.switchTab(i),
+          child: Container(
+            margin: const EdgeInsets.only(right: 8), padding: const EdgeInsets.symmetric(horizontal: 12),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(color: i == b.currentTabIndex ? const Color(0xFF00FFC2).withOpacity(0.2) : Colors.white10, borderRadius: BorderRadius.circular(10), border: i == b.currentTabIndex ? Border.all(color: const Color(0xFF00FFC2), width: 0.5) : null),
+            child: Row(children: [
+              Text(b.tabs[i].title, style: TextStyle(fontSize: 10, color: i == b.currentTabIndex ? Colors.white : Colors.white54), maxLines: 1),
+              const SizedBox(width: 4),
+              GestureDetector(onTap: () => b.closeTab(i), child: const Icon(Icons.close, size: 10, color: Colors.white30))
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showSearch(BuildContext context, BrowserProvider b) {
+    showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (_) => SearchSheet(browser: b));
+  }
+
+  void _showAI(BuildContext context) {
+    showModalBottomSheet(context: context, backgroundColor: Colors.transparent, builder: (_) => const AiSheet());
+  }
+
+  void _showDevConsole(BuildContext context) {
+    showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), builder: (_) => const DevConsoleSheet());
+  }
+
+  void _showUAPicker(BuildContext context, BrowserProvider b) {
+    showDialog(context: context, builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF222222),
+      title: const Text("Custom User Agent", style: TextStyle(color: Colors.white)),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(title: const Text("iPhone 14", style: TextStyle(color: Colors.white)), onTap: () { b.setCustomUA("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"); Navigator.pop(context); }),
+        ListTile(title: const Text("Windows Chrome", style: TextStyle(color: Colors.white)), onTap: () { b.setCustomUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"); Navigator.pop(context); }),
+        ListTile(title: const Text("Google Bot", style: TextStyle(color: Colors.white)), onTap: () { b.setCustomUA("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"); Navigator.pop(context); }),
+      ]),
+    ));
+  }
+}
+
+class GlassBox extends StatelessWidget {
+  final Widget child;
+  final double borderRadius;
+  final EdgeInsets padding;
+  const GlassBox({super.key, required this.child, this.borderRadius = 20, this.padding = const EdgeInsets.all(0)});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(borderRadius),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(color: const Color(0xFF1E1E1E).withOpacity(0.85), borderRadius: BorderRadius.circular(borderRadius), border: Border.all(color: Colors.white.withOpacity(0.1))),
+          child: child,
+        ),
+      ),
     );
   }
 }
 
-class AiAgentPanel extends StatelessWidget {
-  const AiAgentPanel({super.key});
+class SearchSheet extends StatelessWidget {
+  final BrowserProvider browser;
+  const SearchSheet({super.key, required this.browser});
   @override
   Widget build(BuildContext context) {
-    final aiProvider = Provider.of<AiAgentProvider>(context, listen: false);
-    final browser = Provider.of<BrowserProvider>(context, listen: false);
-    final textController = TextEditingController();
-
     return Container(
-      height: MediaQuery.of(context).size.height * 0.7,
-      decoration: const BoxDecoration(color: Color(0xFF1E1E1E), borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
+      height: MediaQuery.of(context).size.height * 0.9,
+      padding: const EdgeInsets.all(20),
+      decoration: const BoxDecoration(color: Color(0xFF101010), borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
       child: Column(children: [
-         const SizedBox(height: 10),
-         Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey, borderRadius: BorderRadius.circular(2))),
-         const SizedBox(height: 10),
-         const Icon(Iconsax.magic_star, size: 40, color: Color(0xFF00FFC2)),
-         const Text("Neon Core AI", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-         const Divider(color: Colors.white12),
-         Expanded(child: ListView.builder(
-           padding: const EdgeInsets.all(16),
-           itemCount: aiProvider.messages.length,
-           itemBuilder: (ctx, i) {
-             final msg = aiProvider.messages[i];
-             return Align(alignment: msg.isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: msg.isUser ? const Color(0xFF00FFC2).withOpacity(0.2) : Colors.white10, borderRadius: BorderRadius.circular(12)), child: Text(msg.text, style: const TextStyle(color: Colors.white))));
-           }
-         )),
-         if (aiProvider.isThinking) const LinearProgressIndicator(minHeight: 2, color: Color(0xFF00FFC2)),
-         Padding(padding: const EdgeInsets.all(16), child: TextField(
-           controller: textController,
-           style: const TextStyle(color: Colors.white),
-           decoration: InputDecoration(
-             hintText: "Command me (e.g. 'Open Youtube')",
-             hintStyle: const TextStyle(color: Colors.white30),
-             filled: true, fillColor: Colors.black26,
-             border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
-             suffixIcon: IconButton(icon: const Icon(Icons.send, color: Color(0xFF00FFC2)), onPressed: () {
-               if (textController.text.isNotEmpty) {
-                 aiProvider.sendMessage(textController.text, browser);
-                 textController.clear();
-               }
-             }),
-           ),
-           onSubmitted: (v) {
-             if (v.isNotEmpty) { aiProvider.sendMessage(v, browser); textController.clear(); }
-           },
-         )),
-         SizedBox(height: MediaQuery.of(context).viewInsets.bottom),
+        TextField(
+          controller: browser.urlController, autofocus: true, style: const TextStyle(fontSize: 16, color: Colors.white),
+          decoration: InputDecoration(
+            hintText: "Search or enter URL", filled: true, fillColor: Colors.white10,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
+            prefixIcon: const Icon(Icons.search, color: Colors.white54),
+            suffixIcon: IconButton(icon: const Icon(Icons.mic, color: Color(0xFF00FFC2)), onPressed: () { browser.startVoice(context); Navigator.pop(context); }),
+          ),
+          onSubmitted: (v) { browser.loadUrl(v); Navigator.pop(context); },
+        ),
       ]),
+    );
+  }
+}
+
+class AiSheet extends StatelessWidget {
+  const AiSheet({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final ai = Provider.of<AiAgentProvider>(context);
+    final browser = Provider.of<BrowserProvider>(context, listen: false);
+    final ctrl = TextEditingController();
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: const BoxDecoration(color: Color(0xFF101010), borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Iconsax.magic_star, color: Color(0xFF00FFC2), size: 40),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 200,
+          child: ListView.builder(itemCount: ai.messages.length, itemBuilder: (c, i) => Text(ai.messages[i].text, style: TextStyle(color: ai.messages[i].isUser ? const Color(0xFF00FFC2) : Colors.white))),
+        ),
+        TextField(
+          controller: ctrl, style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(hintText: "Ask AI...", filled: true, fillColor: Colors.white10, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none)),
+          onSubmitted: (v) { ai.sendMessage(v, browser); ctrl.clear(); },
+        )
+      ]),
+    );
+  }
+}
+
+class DevConsoleSheet extends StatelessWidget {
+  const DevConsoleSheet({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final logs = Provider.of<DevToolsProvider>(context).consoleLogs;
+    return Container(
+      height: 400, padding: const EdgeInsets.all(16),
+      decoration: const BoxDecoration(color: Color(0xFF0D0D0D)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          const Text("DevTools Console", style: TextStyle(color: Color(0xFF00FFC2), fontWeight: FontWeight.bold)),
+          IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () => Provider.of<DevToolsProvider>(context, listen: false).clearLogs()),
+        ]),
+        const Divider(color: Colors.white24),
+        Expanded(child: ListView.builder(
+          itemCount: logs.length,
+          itemBuilder: (ctx, i) => Padding(padding: const EdgeInsets.symmetric(vertical: 2), child: Text(logs[i], style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 10))),
+        )),
+      ]),
+    );
+  }
+}
+
+class SourceViewerPage extends StatelessWidget {
+  final String html;
+  const SourceViewerPage({super.key, required this.html});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0D0D0D),
+      appBar: AppBar(backgroundColor: Colors.transparent, title: const Text("Source Code", style: TextStyle(fontSize: 14))),
+      body: SingleChildScrollView(padding: const EdgeInsets.all(16), child: SelectableText(html, style: const TextStyle(color: Colors.white70, fontFamily: 'monospace', fontSize: 10))),
     );
   }
 }
