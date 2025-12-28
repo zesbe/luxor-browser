@@ -16,7 +16,8 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:uuid/uuid.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:wakelock_plus/wakelock_plus.dart'; // Keep screen on
+import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:local_auth/local_auth.dart'; // Biometric
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,12 +33,71 @@ void main() {
   );
 }
 
-class AiBrowserApp extends StatelessWidget {
+class AiBrowserApp extends StatefulWidget {
   const AiBrowserApp({super.key});
+
+  @override
+  State<AiBrowserApp> createState() => _AiBrowserAppState();
+}
+
+class _AiBrowserAppState extends State<AiBrowserApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Check lock on startup
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Provider.of<BrowserProvider>(context, listen: false).checkBiometricLock(context);
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      // App sent to background, lock it if enabled
+      Provider.of<BrowserProvider>(context, listen: false).isLocked = true;
+    } else if (state == AppLifecycleState.resumed) {
+      // App brought to foreground, prompt unlock
+      Provider.of<BrowserProvider>(context, listen: false).checkBiometricLock(context);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final browser = Provider.of<BrowserProvider>(context);
+    
+    // Lock Screen UI
+    if (browser.isBiometricEnabled && browser.isLocked) {
+      return MaterialApp(
+        home: Scaffold(
+          backgroundColor: Colors.black,
+          body: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.lock, size: 80, color: Color(0xFF00FFC2)),
+                const SizedBox(height: 20),
+                const Text("Browser Locked", style: TextStyle(color: Colors.white, fontSize: 24)),
+                const SizedBox(height: 40),
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.fingerprint),
+                  label: const Text("Unlock"),
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00FFC2), foregroundColor: Colors.black),
+                  onPressed: () => browser.checkBiometricLock(context),
+                )
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return MaterialApp(
       title: 'Neon AI Browser Ultimate',
       theme: ThemeData(
@@ -119,10 +179,13 @@ class BrowserProvider extends ChangeNotifier {
   bool isForceDarkWeb = false;
   bool isJsEnabled = true;
   bool isImagesEnabled = true;
+  bool isBiometricEnabled = false; // Security
+  bool isBackgroundPlayEnabled = true; // Media
   
   // Modes
   bool isZenMode = false;
-  bool isGameMode = false; // New: Game Mode
+  bool isGameMode = false;
+  bool isLocked = true; // App Lock State
   
   // Stats
   int blockedAdsCount = 0;
@@ -143,6 +206,7 @@ class BrowserProvider extends ChangeNotifier {
   TextEditingController findController = TextEditingController();
   stt.SpeechToText _speech = stt.SpeechToText();
   FlutterTts _flutterTts = FlutterTts();
+  final LocalAuthentication auth = LocalAuthentication();
   bool isSpeaking = false;
 
   BrowserProvider() {
@@ -157,7 +221,7 @@ class BrowserProvider extends ChangeNotifier {
     return InAppWebViewSettings(
       isInspectable: true,
       mediaPlaybackRequiresUserGesture: false,
-      allowsInlineMediaPlayback: true,
+      allowsInlineMediaPlayback: true, // Crucial for video
       javaScriptEnabled: isJsEnabled,
       loadsImagesAutomatically: isImagesEnabled,
       cacheEnabled: !currentTab.isIncognito,
@@ -184,6 +248,8 @@ class BrowserProvider extends ChangeNotifier {
     isForceDarkWeb = prefs.getBool('forceDark') ?? false;
     isJsEnabled = prefs.getBool('jsEnabled') ?? true;
     isImagesEnabled = prefs.getBool('imagesEnabled') ?? true;
+    isBiometricEnabled = prefs.getBool('biometric') ?? false;
+    isBackgroundPlayEnabled = prefs.getBool('bgPlay') ?? true;
     blockedAdsCount = prefs.getInt('blockedAds') ?? 0;
     
     int? colorValue = prefs.getInt('neonColor');
@@ -193,6 +259,9 @@ class BrowserProvider extends ChangeNotifier {
     bookmarks = (prefs.getStringList('bookmarks') ?? []).map((e) => BookmarkItem.fromJson(jsonDecode(e))).toList();
     downloads = prefs.getStringList('downloads') ?? [];
     userScripts = (prefs.getStringList('userScripts') ?? []).map((e) => UserScript.fromJson(jsonDecode(e))).toList();
+    
+    // Initial lock state logic
+    isLocked = isBiometricEnabled;
     
     notifyListeners();
   }
@@ -204,6 +273,8 @@ class BrowserProvider extends ChangeNotifier {
     prefs.setBool('forceDark', isForceDarkWeb);
     prefs.setBool('jsEnabled', isJsEnabled);
     prefs.setBool('imagesEnabled', isImagesEnabled);
+    prefs.setBool('biometric', isBiometricEnabled);
+    prefs.setBool('bgPlay', isBackgroundPlayEnabled);
     prefs.setInt('blockedAds', blockedAdsCount);
     prefs.setInt('neonColor', neonColor.value);
     prefs.setStringList('history', history.map((e) => jsonEncode(e.toJson())).toList());
@@ -281,18 +352,43 @@ class BrowserProvider extends ChangeNotifier {
   void toggleGameMode() {
     isGameMode = !isGameMode;
     if (isGameMode) {
-      // Enter Game Mode: Landscape, Fullscreen, WakeLock
       SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       WakelockPlus.enable();
-      isZenMode = true; // Auto Zen Mode
+      isZenMode = true;
     } else {
-      // Exit Game Mode
       SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       WakelockPlus.disable();
       isZenMode = false;
     }
+    notifyListeners();
+  }
+
+  // --- BIOMETRIC ---
+  Future<void> checkBiometricLock(BuildContext context) async {
+    if (!isBiometricEnabled) {
+      isLocked = false;
+      notifyListeners();
+      return;
+    }
+    try {
+      bool authenticated = await auth.authenticate(
+        localizedReason: 'Scan fingerprint to unlock Neon Browser',
+        options: const AuthenticationOptions(stickyAuth: true),
+      );
+      if (authenticated) {
+        isLocked = false;
+        notifyListeners();
+      }
+    } catch (e) {
+      // Fallback or error handling
+    }
+  }
+
+  void toggleBiometric() {
+    isBiometricEnabled = !isBiometricEnabled;
+    _saveData();
     notifyListeners();
   }
 
@@ -311,15 +407,16 @@ class BrowserProvider extends ChangeNotifier {
   void findPrev() => currentTab.controller?.findNext(forward: false);
   void toggleFindBar() { showFindBar = !showFindBar; if (!showFindBar) currentTab.controller?.clearMatches(); notifyListeners(); }
   void toggleReaderMode() { String js = """(function(){var p=document.getElementsByTagName('p');var txt='';for(var i=0;i<p.length;i++)txt+='<p>'+p[i].innerHTML+'</p>';document.body.innerHTML='<div style="max-width:800px;margin:0 auto;padding:20px;font-family:sans-serif;line-height:1.6;color:#e0e0e0;background:#121212;">'+txt+'</div>';document.body.style.backgroundColor='#121212';})();"""; currentTab.controller?.evaluateJavascript(source: js); toggleMenu(); }
+  
   void toggleDesktopMode() async { isDesktopMode = !isDesktopMode; await currentTab.controller?.setSettings(settings: getSettings()); reload(); notifyListeners(); }
   void toggleAdBlock() async { isAdBlockEnabled = !isAdBlockEnabled; await _saveData(); reload(); notifyListeners(); }
   void toggleForceDark() async { isForceDarkWeb = !isForceDarkWeb; await _saveData(); reload(); notifyListeners(); }
   void toggleJs() async { isJsEnabled = !isJsEnabled; await _saveData(); await currentTab.controller?.setSettings(settings: getSettings()); reload(); notifyListeners(); }
   void toggleDataSaver() async { isImagesEnabled = !isImagesEnabled; await _saveData(); await currentTab.controller?.setSettings(settings: getSettings()); reload(); notifyListeners(); }
+  
   void setSearchEngine(String url) { searchEngine = url; _saveData(); notifyListeners(); }
   void clearData() async { await currentTab.controller?.clearCache(); await CookieManager.instance().deleteAllCookies(); history.clear(); downloads.clear(); await _saveData(); notifyListeners(); }
   
-  // --- USER SCRIPTS & TTS (Preserved) ---
   void addUserScript(String name, String code) { userScripts.add(UserScript(id: const Uuid().v4(), name: name, code: code)); _saveData(); notifyListeners(); }
   void toggleUserScript(String id) { final s = userScripts.firstWhere((e) => e.id == id); s.active = !s.active; _saveData(); reload(); notifyListeners(); }
   void deleteUserScript(String id) { userScripts.removeWhere((e) => e.id == id); _saveData(); notifyListeners(); }
@@ -331,7 +428,6 @@ class BrowserProvider extends ChangeNotifier {
     for (var script in userScripts) { if (script.active) { c.evaluateJavascript(source: "(function(){ try { ${script.code} } catch(e) { console.log('UserScript Error: ' + e); } })();"); } }
   }
 
-  // ... (Other Utils)
   Future<void> savePageOffline(BuildContext context) async { try { final webArchive = await currentTab.controller?.saveWebArchive(basename: "saved_page", autoname: true); if (webArchive != null) { addDownload("Offline Archive: $webArchive"); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Page saved for offline reading"))); } } catch (e) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to save page"))); } }
   Future<List<String>> sniffMedia() async { final result = await currentTab.controller?.evaluateJavascript(source: """(function(){var videos=document.getElementsByTagName('video');var audios=document.getElementsByTagName('audio');var links=[];for(var i=0;i<videos.length;i++){if(videos[i].src)links.push(videos[i].src);}for(var i=0;i<audios.length;i++){if(audios[i].src)links.push(audios[i].src);}return links;})();"""); if (result != null) { List<dynamic> list = result; return list.map((e) => e.toString()).toList(); } return []; }
   void startVoice(BuildContext context) async { if (await Permission.microphone.request().isGranted && await _speech.initialize()) { _speech.listen(onResult: (r) { if (r.finalResult) loadUrl(r.recognizedWords); }); } }
@@ -355,6 +451,7 @@ class AiAgentProvider extends ChangeNotifier {
     String resp = "OK.";
     if (text.contains("game")) { b.toggleGameMode(); resp = "Game Mode ${b.isGameMode ? "ON" : "OFF"}."; }
     else if (text.contains("home")) { b.loadUrl("neon://home"); resp = "Going Home."; }
+    else if (text.contains("lock")) { b.toggleBiometric(); resp = "App Lock ${b.isBiometricEnabled ? "Enabled" : "Disabled"}."; }
     else { resp = "I can enable Game Mode or navigate."; }
     messages.add(ChatMessage(text: resp, isUser: false));
     isThinking = false; notifyListeners();
@@ -414,7 +511,6 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
     return Scaffold(
       resizeToAvoidBottomInset: false,
       backgroundColor: Colors.black,
-      // In Game Mode, hide AppBar/BottomBar area completely
       body: Stack(
         children: [
           AnimatedContainer(
@@ -496,7 +592,7 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
                  IconButton(icon: const Icon(Icons.close, color: Colors.red), onPressed: browser.toggleFindBar),
                ]))),
 
-          // Capsule (Hidden in Game Mode / Zen Mode)
+          // Capsule
           if (!browser.showAiSidebar && !browser.isZenMode)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
@@ -534,7 +630,6 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
             ),
           ),
           
-          // Zen Mode / Game Mode Exit Trigger (Small corner button)
           if (browser.isZenMode) 
             Positioned(bottom: 20, right: 20, child: FloatingActionButton.small(backgroundColor: Colors.white10, child: Icon(browser.isGameMode ? Icons.videogame_asset_off : Icons.expand_less, color: Colors.white), onPressed: () => browser.isGameMode ? browser.toggleGameMode() : browser.toggleZenMode())),
         ],
@@ -576,7 +671,7 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
     );
   }
 
-  // --- MODALS (Same as previous) ---
+  // --- MODALS ---
   void _showScriptManager(BuildContext context, BrowserProvider b) {
     showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), builder: (_) => StatefulBuilder(builder: (ctx, setState) {
       return Container(height: 500, padding: const EdgeInsets.all(16), child: Column(children: [
@@ -618,7 +713,12 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
 
   void _showSettingsModal(BuildContext context, BrowserProvider b) {
     showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), isScrollControlled: true, builder: (_) => StatefulBuilder(builder: (ctx, setState) {
-      return Container(height: MediaQuery.of(context).size.height * 0.7, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("Advanced Settings", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 20), Expanded(child: ListView(children: [_sectionHeader("Theme", b), Wrap(spacing: 10, children: [_colorDot(b, const Color(0xFF00FFC2)), _colorDot(b, const Color(0xFFFF0055)), _colorDot(b, const Color(0xFFD500F9)), _colorDot(b, const Color(0xFFFFD700)), _colorDot(b, const Color(0xFF00FF00))]), _sectionHeader("Privacy Stats", b), ListTile(title: const Text("Ads & Trackers Blocked", style: TextStyle(color: Colors.white)), trailing: Text("${b.blockedAdsCount}", style: TextStyle(color: b.neonColor, fontSize: 18, fontWeight: FontWeight.bold))), _sectionHeader("Core", b), SwitchListTile(activeColor: b.neonColor, title: const Text("AdBlocker", style: TextStyle(color: Colors.white)), value: b.isAdBlockEnabled, onChanged: (v) { b.toggleAdBlock(); setState((){}); }), SwitchListTile(activeColor: b.neonColor, title: const Text("Force Dark Web", style: TextStyle(color: Colors.white)), value: b.isForceDarkWeb, onChanged: (v) { b.toggleForceDark(); setState((){}); }), SwitchListTile(activeColor: b.neonColor, title: const Text("Data Saver", style: TextStyle(color: Colors.white)), value: !b.isImagesEnabled, onChanged: (v) { b.toggleDataSaver(); setState((){}); }), ListTile(title: const Text("Clear All Data", style: TextStyle(color: Colors.red)), leading: const Icon(Icons.delete, color: Colors.red), onTap: () { b.clearData(); Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Data Wiped"))); })]))]));
+      return Container(height: MediaQuery.of(context).size.height * 0.7, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text("Advanced Settings", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)), const SizedBox(height: 20), Expanded(child: ListView(children: [_sectionHeader("Theme", b), Wrap(spacing: 10, children: [_colorDot(b, const Color(0xFF00FFC2)), _colorDot(b, const Color(0xFFFF0055)), _colorDot(b, const Color(0xFFD500F9)), _colorDot(b, const Color(0xFFFFD700)), _colorDot(b, const Color(0xFF00FF00))]), 
+      _sectionHeader("Security", b), 
+      SwitchListTile(activeColor: b.neonColor, title: const Text("Biometric Lock", style: TextStyle(color: Colors.white)), subtitle: const Text("Lock app when minimized", style: TextStyle(color: Colors.grey, fontSize: 12)), value: b.isBiometricEnabled, onChanged: (v) { b.toggleBiometric(); setState((){}); }),
+      SwitchListTile(activeColor: b.neonColor, title: const Text("AdBlocker", style: TextStyle(color: Colors.white)), value: b.isAdBlockEnabled, onChanged: (v) { b.toggleAdBlock(); setState((){}); }), 
+      _sectionHeader("Core", b),
+      SwitchListTile(activeColor: b.neonColor, title: const Text("Force Dark Web", style: TextStyle(color: Colors.white)), value: b.isForceDarkWeb, onChanged: (v) { b.toggleForceDark(); setState((){}); }), SwitchListTile(activeColor: b.neonColor, title: const Text("Data Saver", style: TextStyle(color: Colors.white)), value: !b.isImagesEnabled, onChanged: (v) { b.toggleDataSaver(); setState((){}); }), ListTile(title: const Text("Clear All Data", style: TextStyle(color: Colors.red)), leading: const Icon(Icons.delete, color: Colors.red), onTap: () { b.clearData(); Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Data Wiped"))); })]))]));
     }));
   }
 
