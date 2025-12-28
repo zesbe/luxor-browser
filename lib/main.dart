@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -33,16 +34,17 @@ class AiBrowserApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final browser = Provider.of<BrowserProvider>(context);
     return MaterialApp(
       title: 'Neon AI Browser Ultimate',
       theme: ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: Colors.black,
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF00FFC2),
-          secondary: Color(0xFFFF0055),
-          surface: Color(0xFF121212),
+        colorScheme: ColorScheme.dark(
+          primary: browser.neonColor, // Dynamic Theme
+          secondary: Colors.white,
+          surface: const Color(0xFF121212),
         ),
       ),
       home: const BrowserHomePage(),
@@ -59,6 +61,7 @@ class BrowserTab {
   String title;
   bool isIncognito;
   InAppWebViewController? controller;
+  Uint8List? thumbnail; // Tab Thumbnail
   BrowserTab({required this.id, this.url = "neon://home", this.title = "Start Page", this.isIncognito = false});
 }
 
@@ -74,7 +77,7 @@ class DevToolsProvider extends ChangeNotifier {
   void addLog(String message, ConsoleMessageLevel level) {
     final timestamp = DateTime.now().toString().substring(11, 19);
     final levelName = level.toString().split('.').last.toUpperCase();
-    consoleLogs.add("["$timestamp"] $levelName: $message");
+    consoleLogs.add("[$timestamp] $levelName: $message");
     notifyListeners();
   }
   void clearLogs() { consoleLogs.clear(); notifyListeners(); }
@@ -94,12 +97,16 @@ class BrowserProvider extends ChangeNotifier {
   bool isJsEnabled = true;
   bool isZenMode = false;
   
+  // Theme Engine
+  Color neonColor = const Color(0xFF00FFC2); // Default Cyan
+
   // State
   double progress = 0;
   bool isSecure = true;
   bool isMenuOpen = false;
   bool showFindBar = false;
-  bool showAiSidebar = false; // New: Sidebar State
+  bool showAiSidebar = false;
+  bool showTabGrid = false; // New: Show Tab Grid
   SslCertificate? sslCertificate;
   
   TextEditingController urlController = TextEditingController();
@@ -136,6 +143,11 @@ class BrowserProvider extends ChangeNotifier {
     isAdBlockEnabled = prefs.getBool('adBlock') ?? true;
     isForceDarkWeb = prefs.getBool('forceDark') ?? false;
     isJsEnabled = prefs.getBool('jsEnabled') ?? true;
+    
+    // Load Theme
+    int? colorValue = prefs.getInt('neonColor');
+    if (colorValue != null) neonColor = Color(colorValue);
+
     final h = prefs.getStringList('history') ?? [];
     history = h.map((e) => HistoryItem.fromJson(jsonDecode(e))).toList();
     notifyListeners();
@@ -147,13 +159,21 @@ class BrowserProvider extends ChangeNotifier {
     prefs.setBool('adBlock', isAdBlockEnabled);
     prefs.setBool('forceDark', isForceDarkWeb);
     prefs.setBool('jsEnabled', isJsEnabled);
+    prefs.setInt('neonColor', neonColor.value);
     prefs.setStringList('history', history.map((e) => jsonEncode(e.toJson())).toList());
+  }
+
+  void changeTheme(Color color) {
+    neonColor = color;
+    _saveData();
+    notifyListeners();
   }
 
   void _addNewTab([String url = "neon://home", bool incognito = false]) {
     final newTab = BrowserTab(id: const Uuid().v4(), url: url, isIncognito: incognito);
     tabs.add(newTab);
     currentTabIndex = tabs.length - 1;
+    showTabGrid = false; // Auto switch to new tab
     _updateState();
     notifyListeners();
   }
@@ -169,7 +189,19 @@ class BrowserProvider extends ChangeNotifier {
 
   void switchTab(int index) {
     currentTabIndex = index;
+    showTabGrid = false;
     _updateState();
+    notifyListeners();
+  }
+
+  void toggleTabGrid() async {
+    if (!showTabGrid) {
+      // Capture thumbnail before showing grid
+      try {
+        currentTab.thumbnail = await currentTab.controller?.takeScreenshot();
+      } catch (e) { /* ignore */ }
+    }
+    showTabGrid = !showTabGrid;
     notifyListeners();
   }
 
@@ -207,13 +239,9 @@ class BrowserProvider extends ChangeNotifier {
   void toggleAiSidebar() { showAiSidebar = !showAiSidebar; notifyListeners(); }
 
   // --- FEATURES ---
-
   void findInPage(String text) {
-    if (text.isEmpty) {
-      currentTab.controller?.clearMatches();
-    } else {
-      currentTab.controller?.findAllAsync(find: text);
-    }
+    if (text.isEmpty) { currentTab.controller?.clearMatches(); } 
+    else { currentTab.controller?.findAllAsync(find: text); }
   }
   void findNext() => currentTab.controller?.findNext(forward: true);
   void findPrev() => currentTab.controller?.findNext(forward: false);
@@ -277,16 +305,16 @@ class BrowserProvider extends ChangeNotifier {
 }
 
 class AiAgentProvider extends ChangeNotifier {
-  List<ChatMessage> messages = [ChatMessage(text: "Co-Pilot Active.", isUser: false)];
+  List<ChatMessage> messages = [ChatMessage(text: "System Ready.", isUser: false)];
   bool isThinking = false;
   void sendMessage(String text, BrowserProvider b) async {
     messages.add(ChatMessage(text: text, isUser: true));
     isThinking = true; notifyListeners();
     await Future.delayed(const Duration(milliseconds: 600));
     String resp = "OK.";
-    if (text.contains("summarize")) { resp = "Page Summary:\nThis page content is about..."; }
-    else if (text.contains("home")) { b.loadUrl("neon://home"); resp = "Going Home."; }
-    else { resp = "I can summarize this page or navigate for you."; }
+    if (text.contains("home")) { b.loadUrl("neon://home"); resp = "Going Home."; }
+    else if (text.contains("dark")) { b.toggleForceDark(); resp = "Dark Mode Toggled."; }
+    else { resp = "I can navigate or change settings."; }
     messages.add(ChatMessage(text: resp, isUser: false));
     isThinking = false; notifyListeners();
   }
@@ -340,15 +368,18 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
 
     final bool isStartPage = browser.currentTab.url == "neon://home";
 
+    // IF TAB GRID IS OPEN, SHOW GRID INSTEAD OF BROWSER
+    if (browser.showTabGrid) {
+      return TabGridPage(browser: browser);
+    }
+
     return Scaffold(
       resizeToAvoidBottomInset: false,
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Main Content
           AnimatedContainer(
             duration: const Duration(milliseconds: 300),
-            // Shrink width slightly when AI Sidebar is open
             width: browser.showAiSidebar ? MediaQuery.of(context).size.width * 0.7 : MediaQuery.of(context).size.width,
             child: Column(
               children: [
@@ -381,17 +412,16 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
             ),
           ),
           
-          // Loading Bar
           if (browser.progress < 1.0 && !isStartPage)
-            Positioned(top: 0, left: 0, right: 0, child: LinearProgressIndicator(value: browser.progress, minHeight: 2, color: const Color(0xFF00FFC2), backgroundColor: Colors.transparent)),
+            Positioned(top: 0, left: 0, right: 0, child: LinearProgressIndicator(value: browser.progress, minHeight: 2, color: browser.neonColor, backgroundColor: Colors.transparent)),
 
-          // --- AI SIDEBAR (RIGHT) ---
+          // --- AI SIDEBAR ---
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeInOut,
             right: browser.showAiSidebar ? 0 : -300,
             top: 0, bottom: 0,
-            width: MediaQuery.of(context).size.width * 0.75, // Cover 75% screen
+            width: MediaQuery.of(context).size.width * 0.75,
             child: GlassBox(
               borderRadius: 0,
               padding: const EdgeInsets.only(top: 40),
@@ -410,15 +440,12 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     _buildGridMenu(context, browser),
-                    const Divider(color: Colors.white10),
-                    _buildTabStrip(browser),
                   ],
                 ),
               ),
             ),
           ),
 
-          // Find Bar Overlay
           if (browser.showFindBar)
              Positioned(
                bottom: browser.isZenMode ? 20 : 140, left: 20, right: 20,
@@ -430,8 +457,7 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
                ])),
              ),
 
-          // Capsule
-          if (!browser.showAiSidebar) // Hide capsule if sidebar is open (cleaner view)
+          if (!browser.showAiSidebar)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             bottom: browser.isZenMode ? -100 : 20,
@@ -457,13 +483,22 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
                            ),
                            const SizedBox(width: 8),
                            Expanded(child: Text(isStartPage ? "Search or type URL" : browser.currentTab.url.replaceFirst("https://", ""), style: const TextStyle(color: Colors.white70, fontSize: 13), overflow: TextOverflow.ellipsis)),
+                           // Tab Counter (Triggers Grid)
+                           GestureDetector(
+                             onTap: () => browser.toggleTabGrid(),
+                             child: Container(
+                               width: 24, height: 24,
+                               alignment: Alignment.center,
+                               decoration: BoxDecoration(border: Border.all(color: Colors.white30), borderRadius: BorderRadius.circular(5)),
+                               child: Text("${browser.tabs.length}", style: const TextStyle(fontSize: 10, color: Colors.white)),
+                             ),
+                           )
                         ]),
                       ),
                     ),
                   ),
                   const SizedBox(width: 8),
-                  // Toggle AI Sidebar instead of Sheet
-                  _circleBtn(Iconsax.magic_star, () => browser.toggleAiSidebar(), color: const Color(0xFF00FFC2)),
+                  _circleBtn(Iconsax.magic_star, () => browser.toggleAiSidebar(), color: browser.neonColor),
                 ],
               ),
             ),
@@ -488,7 +523,7 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
         _menuItem(Iconsax.arrow_left_2, "Back", b.goBack),
         _menuItem(Iconsax.arrow_right_3, "Fwd", b.goForward),
         _menuItem(Iconsax.refresh, "Reload", b.reload),
-        _menuItem(Iconsax.add, "New", () { b._addNewTab(); b.toggleMenu(); }),
+        _menuItem(Iconsax.element_plus, "Tabs", () { b.toggleMenu(); b.toggleTabGrid(); }),
         _menuItem(Iconsax.search_status, "Find", () { b.toggleMenu(); b.toggleFindBar(); }),
         _menuItem(Iconsax.monitor, "Desktop", b.toggleDesktopMode, isActive: b.isDesktopMode),
         _menuItem(Iconsax.book_1, "Reader", () { b.toggleReaderMode(); }),
@@ -503,26 +538,14 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
     return GestureDetector(
       onTap: onTap,
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: isActive ? const Color(0xFF00FFC2) : Colors.white10, shape: BoxShape.circle), child: Icon(icon, size: 18, color: isActive ? Colors.black : Colors.white)),
+        Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: isActive ? Provider.of<BrowserProvider>(context).neonColor : Colors.white10, shape: BoxShape.circle), child: Icon(icon, size: 18, color: isActive ? Colors.black : Colors.white)),
         const SizedBox(height: 5),
         Text(label, style: const TextStyle(fontSize: 10, color: Colors.white70), maxLines: 1),
       ]),
     );
   }
 
-  Widget _buildTabStrip(BrowserProvider b) {
-    return Container(height: 40, margin: const EdgeInsets.only(bottom: 10), child: ListView.builder(
-      scrollDirection: Axis.horizontal, itemCount: b.tabs.length, padding: const EdgeInsets.symmetric(horizontal: 10),
-      itemBuilder: (ctx, i) => GestureDetector(
-        onTap: () => b.switchTab(i),
-        child: Container(margin: const EdgeInsets.only(right: 8), padding: const EdgeInsets.symmetric(horizontal: 12), alignment: Alignment.center, decoration: BoxDecoration(color: i == b.currentTabIndex ? const Color(0xFF00FFC2).withOpacity(0.2) : Colors.white10, borderRadius: BorderRadius.circular(10), border: i == b.currentTabIndex ? Border.all(color: const Color(0xFF00FFC2), width: 0.5) : null), child: Row(children: [
-          Text(b.tabs[i].title, style: TextStyle(fontSize: 10, color: i == b.currentTabIndex ? Colors.white : Colors.white54), maxLines: 1),
-          const SizedBox(width: 4), GestureDetector(onTap: () => b.closeTab(i), child: const Icon(Icons.close, size: 10, color: Colors.white30))
-        ]))),
-      ),
-    ));
-  }
-
+  // --- MODALS ---
   void _showSSLCertificate(BuildContext context, BrowserProvider b) {
     if (b.currentTab.url == "neon://home") return;
     showDialog(context: context, builder: (_) => AlertDialog(
@@ -539,24 +562,43 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
 
   void _showSettingsModal(BuildContext context, BrowserProvider b) {
     showModalBottomSheet(context: context, backgroundColor: const Color(0xFF101010), isScrollControlled: true, builder: (_) => StatefulBuilder(builder: (ctx, setState) {
-      return Container(height: MediaQuery.of(context).size.height * 0.6, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      return Container(height: MediaQuery.of(context).size.height * 0.7, padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text("Advanced Settings", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
         const SizedBox(height: 20),
         Expanded(child: ListView(children: [
-          _sectionHeader("Display"),
-          SwitchListTile(title: const Text("Force Dark Web", style: TextStyle(color: Colors.white)), value: b.isForceDarkWeb, onChanged: (v) { b.toggleForceDark(); setState((){}); }),
-          SwitchListTile(title: const Text("Desktop Mode", style: TextStyle(color: Colors.white)), value: b.isDesktopMode, onChanged: (v) { b.toggleDesktopMode(); setState((){}); }),
-          _sectionHeader("Security"),
-          SwitchListTile(title: const Text("AdBlocker", style: TextStyle(color: Colors.white)), value: b.isAdBlockEnabled, onChanged: (v) { b.toggleAdBlock(); setState((){}); }),
-          SwitchListTile(title: const Text("JavaScript", style: TextStyle(color: Colors.white)), value: b.isJsEnabled, onChanged: (v) { b.toggleJs(); setState((){}); }),
-          _sectionHeader("Data"),
+          _sectionHeader("Theme", b),
+          Wrap(spacing: 10, children: [
+            _colorDot(b, const Color(0xFF00FFC2)), // Cyan
+            _colorDot(b, const Color(0xFFFF0055)), // Neon Red
+            _colorDot(b, const Color(0xFFD500F9)), // Purple
+            _colorDot(b, const Color(0xFFFFD700)), // Gold
+            _colorDot(b, const Color(0xFF00FF00)), // Matrix Green
+          ]),
+          _sectionHeader("Display", b),
+          SwitchListTile(activeColor: b.neonColor, title: const Text("Force Dark Web", style: TextStyle(color: Colors.white)), value: b.isForceDarkWeb, onChanged: (v) { b.toggleForceDark(); setState((){}); }),
+          SwitchListTile(activeColor: b.neonColor, title: const Text("Desktop Mode", style: TextStyle(color: Colors.white)), value: b.isDesktopMode, onChanged: (v) { b.toggleDesktopMode(); setState((){}); }),
+          _sectionHeader("Security", b),
+          SwitchListTile(activeColor: b.neonColor, title: const Text("AdBlocker", style: TextStyle(color: Colors.white)), value: b.isAdBlockEnabled, onChanged: (v) { b.toggleAdBlock(); setState((){}); }),
+          SwitchListTile(activeColor: b.neonColor, title: const Text("JavaScript", style: TextStyle(color: Colors.white)), value: b.isJsEnabled, onChanged: (v) { b.toggleJs(); setState((){}); }),
+          _sectionHeader("Data", b),
           ListTile(title: const Text("Clear All Data", style: TextStyle(color: Colors.red)), leading: const Icon(Icons.delete, color: Colors.red), onTap: () { b.clearData(); Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Data Wiped"))); }),
         ])),
       ]));
     }));
   }
 
-  Widget _sectionHeader(String title) => Padding(padding: const EdgeInsets.only(top: 16, bottom: 8), child: Text(title, style: const TextStyle(color: Color(0xFF00FFC2), fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.2)));
+  Widget _colorDot(BrowserProvider b, Color color) {
+    return GestureDetector(
+      onTap: () => b.changeTheme(color),
+      child: Container(
+        width: 30, height: 30,
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle, border: b.neonColor == color ? Border.all(color: Colors.white, width: 2) : null),
+      ),
+    );
+  }
+
+  Widget _sectionHeader(String title, BrowserProvider b) => Padding(padding: const EdgeInsets.only(top: 16, bottom: 8), child: Text(title, style: TextStyle(color: b.neonColor, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.2)));
 
   void _showSearch(BuildContext context, BrowserProvider b) {
     showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: Colors.transparent, builder: (_) => SearchSheet(browser: b));
@@ -566,27 +608,72 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
   }
 }
 
-class StartPage extends StatelessWidget {
+// --- NEW PAGE: TAB GRID ---
+
+class TabGridPage extends StatelessWidget {
   final BrowserProvider browser;
-  const StartPage({super.key, required this.browser});
+  const TabGridPage({super.key, required this.browser});
+
   @override
   Widget build(BuildContext context) {
-    return Container(color: Colors.black, child: Center(child: SingleChildScrollView(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-      const Icon(Iconsax.global, size: 80, color: Color(0xFF00FFC2)), const SizedBox(height: 20),
-      const Text("NEON BROWSER", style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2)), const SizedBox(height: 40),
-      Container(margin: const EdgeInsets.symmetric(horizontal: 40), decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(30), border: Border.all(color: Colors.white24)), child: TextField(style: const TextStyle(color: Colors.white), textAlign: TextAlign.center, decoration: const InputDecoration(hintText: "Search or enter URL", hintStyle: TextStyle(color: Colors.white30), border: InputBorder.none, contentPadding: EdgeInsets.all(16)), onSubmitted: (v) => browser.loadUrl(v))),
-      const SizedBox(height: 40),
-      Wrap(spacing: 20, runSpacing: 20, children: [
-        _speedDial(Iconsax.search_normal, "Google", "google.com", Colors.blue), _speedDial(Iconsax.video, "Youtube", "youtube.com", Colors.red),
-        _speedDial(Iconsax.gram, "Instagram", "instagram.com", Colors.purple), _speedDial(Iconsax.code, "GitHub", "github.com", Colors.white),
-      ])
-    ]))));
-  }
-  Widget _speedDial(IconData icon, String label, String url, Color color) {
-    return GestureDetector(onTap: () => browser.loadUrl(url), child: Column(children: [Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), shape: BoxShape.circle), child: Icon(icon, color: color, size: 28)), const SizedBox(height: 8), Text(label, style: const TextStyle(color: Colors.white54, fontSize: 12))]));
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        title: const Text("Tabs", style: TextStyle(color: Colors.white)),
+        actions: [
+          IconButton(icon: const Icon(Icons.add), onPressed: () => browser._addNewTab()),
+          IconButton(icon: const Icon(Icons.close), onPressed: () => browser.toggleTabGrid()),
+        ],
+      ),
+      body: GridView.builder(
+        padding: const EdgeInsets.all(16),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, mainAxisSpacing: 16, crossAxisSpacing: 16, childAspectRatio: 0.7),
+        itemCount: browser.tabs.length,
+        itemBuilder: (context, index) {
+          final tab = browser.tabs[index];
+          final bool active = index == browser.currentTabIndex;
+          return GestureDetector(
+            onTap: () => browser.switchTab(index),
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E),
+                borderRadius: BorderRadius.circular(16),
+                border: active ? Border.all(color: browser.neonColor, width: 2) : Border.all(color: Colors.white10),
+              ),
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Container(
+                      width: double.infinity,
+                      decoration: const BoxDecoration(
+                        color: Colors.black,
+                        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+                      ),
+                      child: tab.thumbnail != null 
+                        ? Image.memory(tab.thumbnail!, fit: BoxFit.cover, errorBuilder: (_,__,___) => const Icon(Icons.web, color: Colors.white10))
+                        : const Icon(Icons.web, color: Colors.white24, size: 50),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(children: [
+                      if (tab.isIncognito) const Padding(padding: EdgeInsets.only(right: 5), child: Icon(Iconsax.mask, size: 12, color: Colors.purple)),
+                      Expanded(child: Text(tab.title, style: const TextStyle(color: Colors.white, fontSize: 12), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      GestureDetector(onTap: () => browser.closeTab(index), child: const Icon(Icons.close, size: 16, color: Colors.white54))
+                    ]),
+                  )
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 }
 
+// ... (Other Classes: AiSidebar, StartPage, etc. - Kept as is)
 class AiSidebar extends StatelessWidget {
   const AiSidebar({super.key});
   @override
@@ -594,59 +681,33 @@ class AiSidebar extends StatelessWidget {
     final ai = Provider.of<AiAgentProvider>(context);
     final browser = Provider.of<BrowserProvider>(context, listen: false);
     final ctrl = TextEditingController();
-    
-    return Column(
-      children: [
-        AppBar(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          leading: IconButton(icon: const Icon(Icons.arrow_forward), onPressed: () => browser.toggleAiSidebar()),
-          title: const Text("Neon Co-Pilot", style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF00FFC2))),
-        ),
-        const Divider(color: Colors.white12),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: ai.messages.length,
-            itemBuilder: (ctx, i) {
-               final msg = ai.messages[i];
-               return Align(
-                 alignment: msg.isUser ? Alignment.centerRight : Alignment.centerLeft,
-                 child: Container(
-                   margin: const EdgeInsets.symmetric(vertical: 4),
-                   padding: const EdgeInsets.all(12),
-                   decoration: BoxDecoration(
-                     color: msg.isUser ? const Color(0xFF00FFC2).withOpacity(0.2) : Colors.white10,
-                     borderRadius: BorderRadius.circular(12)
-                   ),
-                   child: Text(msg.text, style: const TextStyle(color: Colors.white, fontSize: 12))
-                 ),
-               );
-            }
-          ),
-        ),
-        if (ai.isThinking) const LinearProgressIndicator(minHeight: 1, color: Color(0xFF00FFC2)),
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: TextField(
-            controller: ctrl,
-            style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(
-              hintText: "Chat with page context...",
-              filled: true, fillColor: Colors.black45,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
-              suffixIcon: IconButton(icon: const Icon(Icons.send, color: Color(0xFF00FFC2)), onPressed: () { ai.sendMessage(ctrl.text, browser); ctrl.clear(); }),
-            ),
-            onSubmitted: (v) { ai.sendMessage(v, browser); ctrl.clear(); },
-          ),
-        ),
-        SizedBox(height: MediaQuery.of(context).viewInsets.bottom),
-      ],
-    );
+    return Column(children: [
+      AppBar(backgroundColor: Colors.transparent, elevation: 0, leading: IconButton(icon: const Icon(Icons.arrow_forward), onPressed: () => browser.toggleAiSidebar()), title: Text("Neon Co-Pilot", style: TextStyle(fontWeight: FontWeight.bold, color: browser.neonColor))),
+      const Divider(color: Colors.white12),
+      Expanded(child: ListView.builder(padding: const EdgeInsets.all(16), itemCount: ai.messages.length, itemBuilder: (ctx, i) { final msg = ai.messages[i]; return Align(alignment: msg.isUser ? Alignment.centerRight : Alignment.centerLeft, child: Container(margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: msg.isUser ? browser.neonColor.withOpacity(0.2) : Colors.white10, borderRadius: BorderRadius.circular(12)), child: Text(msg.text, style: const TextStyle(color: Colors.white, fontSize: 12)))); })),
+      if (ai.isThinking) LinearProgressIndicator(minHeight: 1, color: browser.neonColor),
+      Padding(padding: const EdgeInsets.all(16), child: TextField(controller: ctrl, style: const TextStyle(color: Colors.white), decoration: InputDecoration(hintText: "Chat...", filled: true, fillColor: Colors.black45, border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none), suffixIcon: IconButton(icon: Icon(Icons.send, color: browser.neonColor), onPressed: () { ai.sendMessage(ctrl.text, browser); ctrl.clear(); })), onSubmitted: (v) { ai.sendMessage(v, browser); ctrl.clear(); })),
+      SizedBox(height: MediaQuery.of(context).viewInsets.bottom),
+    ]);
   }
 }
-
-// ... (Other Classes: GlassBox, SearchSheet, DevConsoleSheet, SourceViewerPage)
+class StartPage extends StatelessWidget {
+  final BrowserProvider browser;
+  const StartPage({super.key, required this.browser});
+  @override
+  Widget build(BuildContext context) {
+    return Container(color: Colors.black, child: Center(child: SingleChildScrollView(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Iconsax.global, size: 80, color: browser.neonColor), const SizedBox(height: 20),
+      const Text("NEON BROWSER", style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2)), const SizedBox(height: 40),
+      Container(margin: const EdgeInsets.symmetric(horizontal: 40), decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(30), border: Border.all(color: Colors.white24)), child: TextField(style: const TextStyle(color: Colors.white), textAlign: TextAlign.center, decoration: const InputDecoration(hintText: "Search or enter URL", hintStyle: TextStyle(color: Colors.white30), border: InputBorder.none, contentPadding: EdgeInsets.all(16)), onSubmitted: (v) => browser.loadUrl(v))),
+      const SizedBox(height: 40),
+      Wrap(spacing: 20, runSpacing: 20, children: [_speedDial(Iconsax.search_normal, "Google", "google.com", Colors.blue, browser), _speedDial(Iconsax.video, "Youtube", "youtube.com", Colors.red, browser), _speedDial(Iconsax.gram, "Instagram", "instagram.com", Colors.purple, browser), _speedDial(Iconsax.code, "GitHub", "github.com", Colors.white, browser)])
+    ]))));
+  }
+  Widget _speedDial(IconData icon, String label, String url, Color color, BrowserProvider b) {
+    return GestureDetector(onTap: () => b.loadUrl(url), child: Column(children: [Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), shape: BoxShape.circle), child: Icon(icon, color: color, size: 28)), const SizedBox(height: 8), Text(label, style: const TextStyle(color: Colors.white54, fontSize: 12))]));
+  }
+}
 class GlassBox extends StatelessWidget {
   final Widget child;
   final double borderRadius;
@@ -663,7 +724,7 @@ class SearchSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(height: MediaQuery.of(context).size.height * 0.9, padding: const EdgeInsets.all(20), decoration: const BoxDecoration(color: Color(0xFF101010), borderRadius: BorderRadius.vertical(top: Radius.circular(30))), child: Column(children: [
-      TextField(controller: browser.urlController, autofocus: true, style: const TextStyle(fontSize: 16, color: Colors.white), decoration: InputDecoration(hintText: "Search or enter URL", filled: true, fillColor: Colors.white10, border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none), prefixIcon: const Icon(Icons.search, color: Colors.white54), suffixIcon: IconButton(icon: const Icon(Icons.mic, color: Color(0xFF00FFC2)), onPressed: () { browser.startVoice(context); Navigator.pop(context); })), onSubmitted: (v) { browser.loadUrl(v); Navigator.pop(context); }),
+      TextField(controller: browser.urlController, autofocus: true, style: const TextStyle(fontSize: 16, color: Colors.white), decoration: InputDecoration(hintText: "Search or enter URL", filled: true, fillColor: Colors.white10, border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none), prefixIcon: const Icon(Icons.search, color: Colors.white54), suffixIcon: IconButton(icon: Icon(Icons.mic, color: browser.neonColor), onPressed: () { browser.startVoice(context); Navigator.pop(context); })), onSubmitted: (v) { browser.loadUrl(v); Navigator.pop(context); }),
     ]));
   }
 }
@@ -672,8 +733,9 @@ class DevConsoleSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final logs = Provider.of<DevToolsProvider>(context).consoleLogs;
+    final b = Provider.of<BrowserProvider>(context);
     return Container(height: 400, padding: const EdgeInsets.all(16), decoration: const BoxDecoration(color: Color(0xFF0D0D0D)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text("DevTools Console", style: TextStyle(color: Color(0xFF00FFC2), fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () => Provider.of<DevToolsProvider>(context, listen: false).clearLogs())]),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text("DevTools Console", style: TextStyle(color: b.neonColor, fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () => Provider.of<DevToolsProvider>(context, listen: false).clearLogs())]),
       const Divider(color: Colors.white24),
       Expanded(child: ListView.builder(itemCount: logs.length, itemBuilder: (ctx, i) => Padding(padding: const EdgeInsets.symmetric(vertical: 2), child: Text(logs[i], style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 10))))),
     ]));
