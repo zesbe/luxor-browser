@@ -33,6 +33,10 @@ jobs:
           sed -i 's/gradle-7.6.3-all.zip/gradle-8.3-all.zip/' android/gradle/wrapper/gradle-wrapper.properties
           sed -i 's/gradle-7.5-all.zip/gradle-8.3-all.zip/' android/gradle/wrapper/gradle-wrapper.properties
 
+          # Remove generated styles.xml to avoid duplicate resources with themes.xml
+          rm -f android/app/src/main/res/values/styles.xml
+          rm -f android/app/src/main/res/values-night/styles.xml
+
           # Tambahkan izin internet dan microphone ke AndroidManifest.xml
           sed -i '/<application/i \    <uses-permission android:name="android.permission.INTERNET" />' android/app/src/main/AndroidManifest.xml
           sed -i '/<application/i \    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />' android/app/src/main/AndroidManifest.xml
