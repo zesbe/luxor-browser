@@ -25,6 +25,18 @@ jobs:
           flutter-version: '3.19.0'
           channel: 'stable'
 
+      - name: Setup Debug Keystore
+        run: |
+          mkdir -p ~/.android
+          if [ -n "${{ secrets.DEBUG_KEYSTORE }}" ]; then
+            echo "${{ secrets.DEBUG_KEYSTORE }}" | base64 -d > ~/.android/debug.keystore
+            echo "✅ Using custom debug keystore from secrets"
+          else
+            echo "⚠️ No DEBUG_KEYSTORE secret found, using default"
+          fi
+          # Print SHA-1 for Firebase registration
+          keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android 2>/dev/null | grep SHA1 || true
+
       - name: Generate Platform Files
         run: |
           flutter create . --platforms android --project-name ai_browser_agent
