@@ -1,13 +1,13 @@
 {
   "project_info": {
-    "project_number": "000000000000",
-    "project_id": "luxor-browser-placeholder",
-    "storage_bucket": "luxor-browser-placeholder.appspot.com"
+    "project_number": "414348456164",
+    "project_id": "luxor-browser-sync",
+    "storage_bucket": "luxor-browser-sync.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+        "mobilesdk_app_id": "1:414348456164:android:8267611f4d3b251a77bcf1",
         "android_client_info": {
           "package_name": "com.example.ai_browser_agent"
         }
@@ -15,7 +15,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyPlaceholderKeyForBuildOnly000000"
+          "current_key": "AIzaSyAsZovnsjTgA_yWiwFyiamAYLvaoU7fdC4"
         }
       ],
       "services": {
