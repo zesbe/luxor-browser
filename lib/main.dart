@@ -20,15 +20,27 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'services/sync_service.dart';
+import 'pages/sync_settings_page.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Firebase
+  await Firebase.initializeApp();
+
+  // Initialize SyncService
+  final syncService = SyncService();
+  await syncService.initialize();
+
   runApp(
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => BrowserProvider()),
         ChangeNotifierProvider(create: (_) => AiAgentProvider()),
         ChangeNotifierProvider(create: (_) => DevToolsProvider()),
+        ChangeNotifierProvider.value(value: syncService),
       ],
       child: const LuxorBrowserApp(),
     ),
@@ -133,22 +145,71 @@ class UserScript {
 class DownloadItem {
   final String id, url, filename;
   int progress;
-  String status; // downloading, completed, failed, paused
+  String status; // downloading, completed, failed, paused, queued
   final DateTime startedAt;
   String? filePath;
-  int? totalBytes;
+  int totalBytes;
   int downloadedBytes;
+  double speed; // bytes per second
+  String? mimeType;
+  String? error;
+  HttpClient? _httpClient;
+  IOSink? _fileSink;
+  StreamSubscription? _subscription;
+  bool _isPaused = false;
+
   DownloadItem({
     required this.url,
     required this.filename,
     String? id,
     this.progress = 0,
-    this.status = "downloading",
+    this.status = "queued",
     DateTime? startedAt,
     this.filePath,
-    this.totalBytes,
+    this.totalBytes = 0,
     this.downloadedBytes = 0,
+    this.speed = 0,
+    this.mimeType,
+    this.error,
   }) : id = id ?? const Uuid().v4(), startedAt = startedAt ?? DateTime.now();
+
+  String get formattedSpeed {
+    if (speed < 1024) return "${speed.toStringAsFixed(0)} B/s";
+    if (speed < 1024 * 1024) return "${(speed / 1024).toStringAsFixed(1)} KB/s";
+    return "${(speed / (1024 * 1024)).toStringAsFixed(1)} MB/s";
+  }
+
+  String get formattedSize {
+    if (totalBytes == 0) return "Unknown";
+    if (totalBytes < 1024) return "$totalBytes B";
+    if (totalBytes < 1024 * 1024) return "${(totalBytes / 1024).toStringAsFixed(1)} KB";
+    if (totalBytes < 1024 * 1024 * 1024) return "${(totalBytes / (1024 * 1024)).toStringAsFixed(1)} MB";
+    return "${(totalBytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB";
+  }
+
+  String get formattedDownloaded {
+    if (downloadedBytes < 1024) return "$downloadedBytes B";
+    if (downloadedBytes < 1024 * 1024) return "${(downloadedBytes / 1024).toStringAsFixed(1)} KB";
+    if (downloadedBytes < 1024 * 1024 * 1024) return "${(downloadedBytes / (1024 * 1024)).toStringAsFixed(1)} MB";
+    return "${(downloadedBytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB";
+  }
+
+  String get eta {
+    if (speed <= 0 || totalBytes <= 0) return "--:--";
+    final remaining = totalBytes - downloadedBytes;
+    final seconds = (remaining / speed).round();
+    if (seconds < 60) return "${seconds}s";
+    if (seconds < 3600) return "${seconds ~/ 60}m ${seconds % 60}s";
+    return "${seconds ~/ 3600}h ${(seconds % 3600) ~/ 60}m";
+  }
+
+  void cancel() {
+    _subscription?.cancel();
+    _fileSink?.close();
+    _httpClient?.close(force: true);
+    status = "failed";
+    error = "Cancelled";
+  }
 }
 
 // User Agent Presets
@@ -1570,6 +1631,10 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
             Text("Settings", style: TextStyle(color: b.neonColor, fontSize: 22, fontWeight: FontWeight.bold)),
             const SizedBox(height: 20),
 
+            // Sync & Account Section
+            _buildSyncAccountTile(context, b),
+            const SizedBox(height: 16),
+
             _settingsSection("Privacy & Security", b),
             SwitchListTile(activeColor: b.neonColor, title: const Text("DNS over HTTPS (DoH)", style: TextStyle(color: Colors.white)), subtitle: const Text("Secure DNS queries", style: TextStyle(color: Colors.grey, fontSize: 12)), value: b.isDohEnabled, onChanged: (v) { b.toggleDoh(); setState((){}); }),
             if (b.isDohEnabled) ListTile(
@@ -1732,6 +1797,78 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
           TextButton(onPressed: () { b.clearBrowsingData(clearHistory: clearHistory, clearCache: clearCache, clearCookies: clearCookies); Navigator.pop(context); }, child: const Text("Clear", style: TextStyle(color: Colors.red))),
         ],
       )),
+    );
+  }
+
+  Widget _buildSyncAccountTile(BuildContext context, BrowserProvider b) {
+    final syncService = Provider.of<SyncService>(context, listen: true);
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: b.neonColor.withOpacity(0.3)),
+      ),
+      child: ListTile(
+        leading: syncService.isSignedIn
+            ? CircleAvatar(
+                radius: 20,
+                backgroundColor: b.neonColor.withOpacity(0.2),
+                backgroundImage: syncService.userPhotoUrl != null
+                    ? NetworkImage(syncService.userPhotoUrl!)
+                    : null,
+                child: syncService.userPhotoUrl == null
+                    ? Icon(Icons.person, color: b.neonColor, size: 20)
+                    : null,
+              )
+            : Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: b.neonColor.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Icon(Iconsax.cloud_add, color: b.neonColor, size: 20),
+              ),
+        title: Text(
+          syncService.isSignedIn ? syncService.userName : "Sync & Google Account",
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500),
+        ),
+        subtitle: Text(
+          syncService.isSignedIn
+              ? (syncService.isSyncing ? "Syncing..." : "Signed in • ${syncService.userEmail}")
+              : "Sign in to sync your data",
+          style: TextStyle(color: Colors.grey[500], fontSize: 12),
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (syncService.isSignedIn && syncService.isSyncing)
+              const SizedBox(
+                width: 16, height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else if (syncService.isSignedIn)
+              Icon(
+                syncService.syncEnabled ? Icons.cloud_done : Icons.cloud_off,
+                color: syncService.syncEnabled ? Colors.green : Colors.grey,
+                size: 18,
+              ),
+            const SizedBox(width: 8),
+            Icon(Icons.chevron_right, color: Colors.white54),
+          ],
+        ),
+        onTap: () {
+          Navigator.pop(context);
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => SyncSettingsPage(
+                syncService: syncService,
+                accentColor: b.neonColor,
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
