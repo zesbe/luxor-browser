@@ -27,12 +27,14 @@ import 'pages/sync_settings_page.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize Firebase
-  await Firebase.initializeApp();
-
-  // Initialize SyncService
+  // Initialize SyncService (handles Firebase init internally)
   final syncService = SyncService();
-  await syncService.initialize();
+  try {
+    await syncService.initialize();
+  } catch (e) {
+    // Firebase not configured yet - app will work without sync
+    debugPrint('Sync service init skipped: $e');
+  }
 
   runApp(
     MultiProvider(
