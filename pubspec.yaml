@@ -1,5 +1,5 @@
-name: ai_browser_agent
-description: A powerful AI Agent Browser powered by Chromium and Flutter.
+name: luxor_browser
+description: Luxor Browser - A powerful AI Agent Browser powered by Chromium and Flutter with Google Sync.
 publish_to: 'none'
 version: 1.0.0+1
 
