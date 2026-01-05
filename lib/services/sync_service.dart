@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -7,6 +9,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:crypto/crypto.dart';
 
 // ============================================================================
 // SYNC SERVICE - Google Account Synchronization like Chrome
@@ -40,6 +43,10 @@ class SyncService extends ChangeNotifier {
   StreamSubscription? _connectivitySubscription;
   bool _isOnline = true;
 
+  // Password sync
+  String? _encryptionPassphrase;
+  bool _passphraseSet = false;
+
   // Sync Settings
   bool syncBookmarks = true;
   bool syncHistory = true;
@@ -60,6 +67,7 @@ class SyncService extends ChangeNotifier {
   String get userEmail => _currentUser?.email ?? _googleUser?.email ?? '';
   String get userName => _currentUser?.displayName ?? _googleUser?.displayName ?? 'User';
   String? get userPhotoUrl => _currentUser?.photoURL ?? _googleUser?.photoUrl;
+  bool get passphraseSet => _passphraseSet;
 
   // Initialize Firebase and check for existing sign-in
   Future<void> initialize() async {
@@ -115,6 +123,7 @@ class SyncService extends ChangeNotifier {
     syncSettings = prefs.getBool('sync_settings') ?? true;
     syncPasswords = prefs.getBool('sync_passwords') ?? false;
     syncOpenTabs = prefs.getBool('sync_open_tabs') ?? true;
+    _passphraseSet = prefs.getBool('passphrase_set') ?? false;
 
     final lastSync = prefs.getString('last_sync_time');
     if (lastSync != null) {
@@ -132,6 +141,7 @@ class SyncService extends ChangeNotifier {
     await prefs.setBool('sync_settings', syncSettings);
     await prefs.setBool('sync_passwords', syncPasswords);
     await prefs.setBool('sync_open_tabs', syncOpenTabs);
+    await prefs.setBool('passphrase_set', _passphraseSet);
     if (_lastSyncTime != null) {
       await prefs.setString('last_sync_time', _lastSyncTime!.toIso8601String());
     }
@@ -230,6 +240,10 @@ class SyncService extends ChangeNotifier {
         syncSettings = value;
         break;
       case 'passwords':
+        if (value && !_passphraseSet) {
+          // Need passphrase before enabling password sync
+          return;
+        }
         syncPasswords = value;
         break;
       case 'open_tabs':
@@ -261,6 +275,7 @@ class SyncService extends ChangeNotifier {
       if (syncHistory) await _syncHistory(userDoc);
       if (syncReadingList) await _syncReadingList(userDoc);
       if (syncSettings) await _syncSettings(userDoc);
+      if (syncPasswords && _passphraseSet) await _syncPasswords(userDoc);
       if (syncOpenTabs) await _syncOpenTabs(userDoc);
 
       _lastSyncTime = DateTime.now();
@@ -292,7 +307,7 @@ class SyncService extends ChangeNotifier {
     // Get cloud data
     final cloudDoc = await userDoc.collection('sync_data').doc('bookmarks').get();
     final cloudBookmarks = cloudDoc.exists
-        ? List<Map<String, dynamic>>.from(cloudDoc.data()?['items'] ?? [])
+        ? (cloudDoc.data()?['items'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ?? <Map<String, dynamic>>[]
         : <Map<String, dynamic>>[];
 
     // Merge bookmarks (cloud takes priority for conflicts, but keep all unique)
@@ -322,7 +337,7 @@ class SyncService extends ChangeNotifier {
     // Get cloud data
     final cloudDoc = await userDoc.collection('sync_data').doc('history').get();
     final cloudHistory = cloudDoc.exists
-        ? List<Map<String, dynamic>>.from(cloudDoc.data()?['items'] ?? [])
+        ? (cloudDoc.data()?['items'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ?? <Map<String, dynamic>>[]
         : <Map<String, dynamic>>[];
 
     // Merge history by URL + timestamp (keep last 1000 items)
@@ -381,7 +396,7 @@ class SyncService extends ChangeNotifier {
     // Get cloud data
     final cloudDoc = await userDoc.collection('sync_data').doc('reading_list').get();
     final cloudItems = cloudDoc.exists
-        ? List<Map<String, dynamic>>.from(cloudDoc.data()?['items'] ?? [])
+        ? (cloudDoc.data()?['items'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ?? <Map<String, dynamic>>[]
         : <Map<String, dynamic>>[];
 
     // Merge
@@ -443,6 +458,140 @@ class SyncService extends ChangeNotifier {
     await prefs.setInt('neon_color', localSettings['neon_color'] as int);
     await prefs.setDouble('text_scale', localSettings['text_scale'] as double);
     await prefs.setBool('desktop_mode', localSettings['desktop_mode'] as bool);
+  }
+
+  // ============================================================================
+  // PASSWORD SYNC - Encrypted with user passphrase
+  // ============================================================================
+
+  Future<void> _syncPasswords(DocumentReference userDoc) async {
+    if (_encryptionPassphrase == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+
+    // Get local passwords (simulated - in real app would use credential_manager)
+    final localPasswordData = prefs.getString('saved_passwords') ?? '[]';
+    final localPasswords = List<Map<String, dynamic>>.from(jsonDecode(localPasswordData));
+
+    // Get cloud data
+    final cloudDoc = await userDoc.collection('sync_data').doc('passwords').get();
+
+    List<Map<String, dynamic>> cloudPasswords = [];
+    if (cloudDoc.exists) {
+      final encryptedData = cloudDoc.data()?['encrypted_data'] as String?;
+      if (encryptedData != null) {
+        try {
+          final decryptedData = _decryptData(encryptedData, _encryptionPassphrase!);
+          cloudPasswords = (jsonDecode(decryptedData) as List<dynamic>)
+              .cast<Map<String, dynamic>>();
+        } catch (e) {
+          // Decryption failed - wrong passphrase or corrupted data
+          _syncError = 'Password decryption failed. Check your passphrase.';
+          return;
+        }
+      }
+    }
+
+    // Merge passwords (cloud takes priority for conflicts)
+    final merged = _mergeData(localPasswords, cloudPasswords, 'url');
+
+    // Encrypt and save to cloud
+    final encryptedData = _encryptData(jsonEncode(merged), _encryptionPassphrase!);
+    await userDoc.collection('sync_data').doc('passwords').set({
+      'encrypted_data': encryptedData,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+
+    // Save locally
+    await prefs.setString('saved_passwords', jsonEncode(merged));
+  }
+
+  // ============================================================================
+  // ENCRYPTION/DECRYPTION HELPERS
+  // ============================================================================
+
+  String _encryptData(String data, String passphrase) {
+    final key = _deriveKey(passphrase);
+    final bytes = utf8.encode(data);
+
+    // Simple XOR encryption with key (in production use AES)
+    final encrypted = <int>[];
+    for (int i = 0; i < bytes.length; i++) {
+      encrypted.add(bytes[i] ^ key[i % key.length]);
+    }
+
+    return base64Encode(encrypted);
+  }
+
+  String _decryptData(String encryptedData, String passphrase) {
+    final key = _deriveKey(passphrase);
+    final encrypted = base64Decode(encryptedData);
+
+    // Decrypt using XOR
+    final decrypted = <int>[];
+    for (int i = 0; i < encrypted.length; i++) {
+      decrypted.add(encrypted[i] ^ key[i % key.length]);
+    }
+
+    return utf8.decode(decrypted);
+  }
+
+  List<int> _deriveKey(String passphrase) {
+    // Derive encryption key from passphrase using SHA-256
+    final bytes = utf8.encode(passphrase + 'luxor_salt_2025');
+    final digest = sha256.convert(bytes);
+    return digest.bytes;
+  }
+
+  // Set encryption passphrase
+  Future<bool> setEncryptionPassphrase(String passphrase) async {
+    if (passphrase.isEmpty || passphrase.length < 8) {
+      _syncError = 'Passphrase must be at least 8 characters';
+      return false;
+    }
+
+    _encryptionPassphrase = passphrase;
+    _passphraseSet = true;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('passphrase_set', true);
+
+    // Store passphrase hash for verification (not the passphrase itself)
+    final hash = sha256.convert(utf8.encode(passphrase + 'verify_salt')).toString();
+    await prefs.setString('passphrase_hash', hash);
+
+    await _saveSyncPreferences();
+    notifyListeners();
+    return true;
+  }
+
+  // Verify existing passphrase
+  Future<bool> verifyPassphrase(String passphrase) async {
+    final prefs = await SharedPreferences.getInstance();
+    final storedHash = prefs.getString('passphrase_hash');
+
+    if (storedHash == null) return false;
+
+    final inputHash = sha256.convert(utf8.encode(passphrase + 'verify_salt')).toString();
+
+    if (inputHash == storedHash) {
+      _encryptionPassphrase = passphrase;
+      return true;
+    }
+
+    return false;
+  }
+
+  // Clear passphrase and disable password sync
+  Future<void> clearPassphrase() async {
+    _encryptionPassphrase = null;
+    _passphraseSet = false;
+    syncPasswords = false;
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('passphrase_hash');
+    await _saveSyncPreferences();
+    notifyListeners();
   }
 
   // ============================================================================
@@ -508,7 +657,7 @@ class SyncService extends ChangeNotifier {
       if (entry.key != deviceId) {
         final deviceData = entry.value as Map<String, dynamic>;
         result[deviceData['deviceName'] ?? entry.key] =
-            List<Map<String, dynamic>>.from(deviceData['tabs'] ?? []);
+            (deviceData['tabs'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ?? <Map<String, dynamic>>[];
       }
     }
 
