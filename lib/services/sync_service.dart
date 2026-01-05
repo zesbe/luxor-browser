@@ -12,7 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:credential_manager/credential_manager.dart';
+import 'package:credential_manager/credential_manager.dart' hide User;
 import 'package:csv/csv.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -869,6 +869,22 @@ class SyncService extends ChangeNotifier {
   // ANDROID CREDENTIAL MANAGER INTEGRATION
   // ============================================================================
 
+  CredentialManager? _credentialManager;
+
+  // Initialize Credential Manager
+  Future<void> _initCredentialManager() async {
+    try {
+      _credentialManager = CredentialManager();
+      final isSupported = await _credentialManager!.isSupportedPlatform;
+      if (!isSupported) {
+        _credentialManager = null;
+      }
+    } catch (e) {
+      _credentialManager = null;
+      debugPrint('Credential Manager not available: $e');
+    }
+  }
+
   // Save password using Android Credential Manager
   Future<bool> savePasswordWithCredentialManager({
     required String url,
@@ -876,28 +892,30 @@ class SyncService extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      // Create password credential
-      final credential = PasswordCredential(
-        id: username,
-        password: password,
-      );
+      // Always save to local storage for sync
+      await _savePasswordLocally(url, username, password, 'credential_manager');
 
-      // Save to Android Credential Manager
-      final result = await CredentialManager.savePasswordCredentials(credential);
-
-      if (result) {
-        // Also save to local storage for sync
-        await _savePasswordLocally(url, username, password, 'credential_manager');
-
-        // Sync to cloud if enabled
-        if (syncPasswords && _passphraseSet && isSignedIn) {
-          await _performSync();
+      // Try to save with Credential Manager if available
+      if (_credentialManager != null) {
+        try {
+          final credential = PasswordCredential(
+            username: username,
+            password: password,
+          );
+          await _credentialManager!.savePasswordCredentials(credential);
+        } catch (e) {
+          debugPrint('Credential Manager save failed (using local): $e');
         }
       }
 
-      return result;
+      // Sync to cloud if enabled
+      if (syncPasswords && _passphraseSet && isSignedIn) {
+        await _performSync();
+      }
+
+      return true;
     } catch (e) {
-      _syncError = 'Failed to save with Credential Manager: $e';
+      _syncError = 'Failed to save password: $e';
       notifyListeners();
       return false;
     }
@@ -905,35 +923,17 @@ class SyncService extends ChangeNotifier {
 
   // Get password suggestions using Android Credential Manager
   Future<List<Map<String, dynamic>>> getPasswordSuggestions(String url) async {
-    try {
-      // Get credentials from Android Credential Manager
-      final credentials = await CredentialManager.getPasswordCredentials();
-
-      final suggestions = <Map<String, dynamic>>[];
-
-      for (var cred in credentials) {
-        suggestions.add({
-          'id': DateTime.now().millisecondsSinceEpoch.toString(),
-          'url': url,
-          'username': cred.id,
-          'password': cred.password,
-          'title': url,
-          'source': 'credential_manager',
-          'createdAt': DateTime.now().toIso8601String(),
-        });
-      }
-
-      return suggestions;
-    } catch (e) {
-      // Fallback to local passwords
-      return _getLocalPasswordsForUrl(url);
-    }
+    // Always use local passwords as primary source for consistency
+    return _getLocalPasswordsForUrl(url);
   }
 
   // Check if Credential Manager is available
   Future<bool> isCredentialManagerAvailable() async {
     try {
-      return await CredentialManager.isSupported();
+      if (_credentialManager == null) {
+        await _initCredentialManager();
+      }
+      return _credentialManager != null;
     } catch (e) {
       return false;
     }
