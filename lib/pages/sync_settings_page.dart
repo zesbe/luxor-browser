@@ -60,6 +60,12 @@ class _SyncSettingsPageState extends State<SyncSettingsPage> {
                   _buildSyncOptionsSection(),
                   const SizedBox(height: 24),
 
+                  // Password Import/Export
+                  if (widget.syncService.isSignedIn) ...[
+                    _buildPasswordImportExportSection(),
+                    const SizedBox(height: 24),
+                  ],
+
                   // Other Devices
                   _buildOtherDevicesSection(),
                 ],
@@ -605,6 +611,170 @@ class _SyncSettingsPageState extends State<SyncSettingsPage> {
   }
 
   // ============================================================================
+  // PASSWORD IMPORT/EXPORT SECTION
+  // ============================================================================
+
+  Widget _buildPasswordImportExportSection() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Password Import/Export',
+            style: TextStyle(
+              color: widget.accentColor,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Import passwords from Chrome or export your Luxor passwords',
+            style: TextStyle(
+              color: Colors.grey[400],
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _isLoading ? null : _handleImportPasswords,
+                  icon: const Icon(Icons.upload_file, size: 18),
+                  label: const Text('Import from CSV'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: widget.accentColor,
+                    side: BorderSide(color: widget.accentColor.withOpacity(0.5)),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _isLoading ? null : _handleExportPasswords,
+                  icon: const Icon(Icons.download, size: 18),
+                  label: const Text('Export to CSV'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: widget.accentColor,
+                    side: BorderSide(color: widget.accentColor.withOpacity(0.5)),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Chrome Import Instructions
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.blue[900]?.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.blue[700]!.withOpacity(0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.info, color: Colors.blue[400], size: 16),
+                    const SizedBox(width: 8),
+                    Text(
+                      'How to Import from Chrome:',
+                      style: TextStyle(
+                        color: Colors.blue[400],
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '1. Open Chrome → Settings → Password Manager\n'
+                  '2. Click ⚙️ → Export passwords → Download CSV\n'
+                  '3. In Luxor: Import from CSV → Select downloaded file',
+                  style: TextStyle(
+                    color: Colors.grey[300],
+                    fontSize: 12,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Credential Manager Integration
+          FutureBuilder<bool>(
+            future: widget.syncService.isCredentialManagerAvailable(),
+            builder: (context, snapshot) {
+              final isAvailable = snapshot.data ?? false;
+              return Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: isAvailable
+                      ? Colors.green[900]?.withOpacity(0.2)
+                      : Colors.orange[900]?.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: isAvailable
+                        ? Colors.green[700]!.withOpacity(0.3)
+                        : Colors.orange[700]!.withOpacity(0.3),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      isAvailable ? Icons.security : Icons.warning,
+                      color: isAvailable ? Colors.green[400] : Colors.orange[400],
+                      size: 20,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isAvailable
+                                ? 'Android Autofill Ready'
+                                : 'Autofill Limited',
+                            style: TextStyle(
+                              color: isAvailable ? Colors.green[400] : Colors.orange[400],
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            isAvailable
+                                ? 'Passwords will autofill using Android Credential Manager'
+                                : 'Install Google Play Services for full autofill support',
+                            style: TextStyle(
+                              color: Colors.grey[300],
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================================
   // PASSWORD SYNC HANDLERS
   // ============================================================================
 
@@ -731,11 +901,94 @@ class _SyncSettingsPageState extends State<SyncSettingsPage> {
     );
   }
 
+  // ============================================================================
+  // IMPORT/EXPORT HANDLERS
+  // ============================================================================
+
+  Future<void> _handleImportPasswords() async {
+    setState(() => _isLoading = true);
+
+    try {
+      final importedCount = await widget.syncService.importPasswordsFromCSV();
+
+      if (importedCount > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Successfully imported $importedCount passwords'),
+            backgroundColor: Colors.green[700],
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      } else {
+        final error = widget.syncService.syncError ?? 'No passwords were imported';
+        _showError(error);
+      }
+    } catch (e) {
+      _showError('Import failed: $e');
+    }
+
+    setState(() => _isLoading = false);
+  }
+
+  Future<void> _handleExportPasswords() async {
+    setState(() => _isLoading = true);
+
+    try {
+      final filePath = await widget.syncService.exportPasswordsToCSV();
+
+      if (filePath != null) {
+        final fileName = filePath.split('/').last;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Passwords exported successfully!'),
+                const SizedBox(height: 4),
+                Text(
+                  'Saved to: Downloads/$fileName',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+            backgroundColor: Colors.green[700],
+            duration: const Duration(seconds: 4),
+            action: SnackBarAction(
+              label: 'SHARE',
+              textColor: Colors.white,
+              onPressed: () {
+                // Could implement share functionality here
+                _showInfo('File saved to Downloads folder');
+              },
+            ),
+          ),
+        );
+      } else {
+        final error = widget.syncService.syncError ?? 'Export failed';
+        _showError(error);
+      }
+    } catch (e) {
+      _showError('Export failed: $e');
+    }
+
+    setState(() => _isLoading = false);
+  }
+
   void _showError(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
         backgroundColor: Colors.red[700],
+      ),
+    );
+  }
+
+  void _showInfo(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.blue[700],
       ),
     );
   }

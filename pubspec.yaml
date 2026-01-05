@@ -32,6 +32,10 @@ dependencies:
   cloud_firestore: ^4.15.8
   connectivity_plus: ^5.0.2
   crypto: ^3.0.3
+  # Import/Export & Credential Manager
+  file_picker: ^8.0.0+1
+  credential_manager: ^0.2.5
+  csv: ^6.0.0
 
 dev_dependencies:
   flutter_test:
