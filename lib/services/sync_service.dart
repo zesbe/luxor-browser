@@ -803,6 +803,7 @@ class SyncService extends ChangeNotifier {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['csv'],
+        withData: true, // IMPORTANT: Get file bytes directly on Android
       );
 
       if (result == null) {
@@ -810,8 +811,35 @@ class SyncService extends ChangeNotifier {
         return 0;
       }
 
-      final file = File(result.files.single.path!);
-      final csvContent = await file.readAsString();
+      debugPrint('CSV Import: File picked - name=${result.files.single.name}');
+      debugPrint('CSV Import: path=${result.files.single.path}');
+      debugPrint('CSV Import: bytes=${result.files.single.bytes?.length}');
+
+      String csvContent;
+
+      // Try to get content from bytes first (more reliable on Android)
+      if (result.files.single.bytes != null) {
+        csvContent = utf8.decode(result.files.single.bytes!);
+        debugPrint('CSV Import: Loaded from bytes, size=${csvContent.length}');
+      } else if (result.files.single.path != null) {
+        // Fallback to path
+        final file = File(result.files.single.path!);
+        if (await file.exists()) {
+          csvContent = await file.readAsString();
+          debugPrint('CSV Import: Loaded from path, size=${csvContent.length}');
+        } else {
+          debugPrint('CSV Import: File does not exist at path');
+          _syncError = 'Could not read file';
+          notifyListeners();
+          return 0;
+        }
+      } else {
+        debugPrint('CSV Import: No bytes or path available');
+        _syncError = 'Could not read file - no data available';
+        notifyListeners();
+        return 0;
+      }
+
       debugPrint('CSV Import: File loaded, size=${csvContent.length} bytes');
 
       // Parse CSV with proper handling of quoted fields (Chrome format)
@@ -834,7 +862,15 @@ class SyncService extends ChangeNotifier {
       }
 
       // Skip header row
-      final dataRows = csvTable.skip(1);
+      final dataRows = csvTable.skip(1).toList();
+      debugPrint('CSV Import: ${dataRows.length} data rows to process');
+
+      // Debug first 3 rows
+      for (int i = 0; i < 3 && i < dataRows.length; i++) {
+        debugPrint('CSV Import: Row $i = ${dataRows[i]}');
+        debugPrint('CSV Import: Row $i length = ${dataRows[i].length}');
+      }
+
       final prefs = await SharedPreferences.getInstance();
       final existingData = prefs.getString('saved_passwords') ?? '[]';
       final existingPasswords = List<Map<String, dynamic>>.from(jsonDecode(existingData));
@@ -846,7 +882,7 @@ class SyncService extends ChangeNotifier {
 
       // Check URL+username combination, not just URL
       final existingKeys = existingPasswords.map((p) => '${p['url']}|${p['username']}').toSet();
-      debugPrint('CSV Import: ${existingKeys.length} existing passwords');
+      debugPrint('CSV Import: ${existingKeys.length} existing passwords in storage');
 
       for (var row in dataRows) {
         if (row.length >= 4) {
