@@ -353,10 +353,13 @@ class _SyncSettingsPageState extends State<SyncSettingsPage> {
           _buildSyncOption(
             icon: Iconsax.key,
             title: 'Passwords',
-            subtitle: 'Sync saved passwords (encrypted)',
+            subtitle: syncService.passphraseSet
+                ? 'Sync saved passwords (encrypted)'
+                : 'Requires encryption passphrase',
             value: syncService.syncPasswords,
-            onChanged: (v) => syncService.updateSyncSetting('passwords', v),
+            onChanged: (v) => _handlePasswordSyncToggle(v),
             isSecure: true,
+            requiresSetup: !syncService.passphraseSet,
           ),
         ],
       ),
@@ -370,6 +373,7 @@ class _SyncSettingsPageState extends State<SyncSettingsPage> {
     required bool value,
     required ValueChanged<bool> onChanged,
     bool isSecure = false,
+    bool requiresSetup = false,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -406,7 +410,7 @@ class _SyncSettingsPageState extends State<SyncSettingsPage> {
                 Text(
                   subtitle,
                   style: TextStyle(
-                    color: Colors.grey[500],
+                    color: requiresSetup ? Colors.orange[400] : Colors.grey[500],
                     fontSize: 12,
                   ),
                 ),
@@ -598,6 +602,142 @@ class _SyncSettingsPageState extends State<SyncSettingsPage> {
       await widget.syncService.signOut();
       setState(() => _isLoading = false);
     }
+  }
+
+  // ============================================================================
+  // PASSWORD SYNC HANDLERS
+  // ============================================================================
+
+  Future<void> _handlePasswordSyncToggle(bool value) async {
+    if (value && !widget.syncService.passphraseSet) {
+      // Need to set up passphrase first
+      final passphrase = await _showPassphraseDialog();
+      if (passphrase != null) {
+        final success = await widget.syncService.setEncryptionPassphrase(passphrase);
+        if (success) {
+          await widget.syncService.updateSyncSetting('passwords', true);
+        } else {
+          _showError('Failed to set passphrase: ${widget.syncService.syncError}');
+        }
+      }
+    } else if (value && widget.syncService.passphraseSet) {
+      // Verify existing passphrase
+      final passphrase = await _showPassphraseDialog(isVerification: true);
+      if (passphrase != null) {
+        final verified = await widget.syncService.verifyPassphrase(passphrase);
+        if (verified) {
+          await widget.syncService.updateSyncSetting('passwords', true);
+        } else {
+          _showError('Incorrect passphrase');
+        }
+      }
+    } else {
+      // Disable password sync
+      await widget.syncService.updateSyncSetting('passwords', false);
+    }
+  }
+
+  Future<String?> _showPassphraseDialog({bool isVerification = false}) async {
+    final controller = TextEditingController();
+    final confirmController = TextEditingController();
+
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: Text(
+          isVerification ? 'Enter Passphrase' : 'Set Encryption Passphrase',
+          style: TextStyle(color: widget.accentColor),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!isVerification) ...[
+              const Text(
+                'Create a strong passphrase to encrypt your passwords. This cannot be recovered if lost.',
+                style: TextStyle(color: Colors.grey),
+              ),
+              const SizedBox(height: 16),
+            ],
+            TextField(
+              controller: controller,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Passphrase',
+                labelStyle: TextStyle(color: Colors.grey[400]),
+                enabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: Colors.grey[600]!),
+                ),
+                focusedBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: widget.accentColor),
+                ),
+              ),
+              style: const TextStyle(color: Colors.white),
+            ),
+            if (!isVerification) ...[
+              const SizedBox(height: 16),
+              TextField(
+                controller: confirmController,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: 'Confirm Passphrase',
+                  labelStyle: TextStyle(color: Colors.grey[400]),
+                  enabledBorder: UnderlineInputBorder(
+                    borderSide: BorderSide(color: Colors.grey[600]!),
+                  ),
+                  focusedBorder: UnderlineInputBorder(
+                    borderSide: BorderSide(color: widget.accentColor),
+                  ),
+                ),
+                style: const TextStyle(color: Colors.white),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              final passphrase = controller.text;
+
+              if (passphrase.isEmpty) {
+                _showError('Passphrase cannot be empty');
+                return;
+              }
+
+              if (!isVerification && passphrase.length < 8) {
+                _showError('Passphrase must be at least 8 characters');
+                return;
+              }
+
+              if (!isVerification && passphrase != confirmController.text) {
+                _showError('Passphrases do not match');
+                return;
+              }
+
+              Navigator.pop(context, passphrase);
+            },
+            child: Text(
+              isVerification ? 'Verify' : 'Set',
+              style: TextStyle(color: widget.accentColor),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red[700],
+      ),
+    );
   }
 
   String _formatLastSync(DateTime time) {
