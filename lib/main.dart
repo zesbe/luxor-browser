@@ -23,6 +23,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'services/sync_service.dart';
 import 'pages/sync_settings_page.dart';
+import 'pages/password_manager_page.dart';
+import 'utils/password_webview_integration.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -327,6 +329,9 @@ class BrowserProvider extends ChangeNotifier {
   DateTime? _lastPausedTime;
   static const int _lockDelaySeconds = 5;
 
+  // Password Integration
+  final Map<int, PasswordWebViewIntegration> _passwordIntegrations = {};
+
   TextEditingController urlController = TextEditingController(), findController = TextEditingController();
   stt.SpeechToText _speech = stt.SpeechToText();
   FlutterTts _flutterTts = FlutterTts();
@@ -458,6 +463,9 @@ class BrowserProvider extends ChangeNotifier {
 
   void closeTab(int index) {
     if (tabs.length > 1) {
+      // Clean up password integration for this tab
+      _cleanupPasswordIntegration(index);
+
       tabs.removeAt(index);
       if (currentTabIndex >= tabs.length) currentTabIndex = tabs.length - 1;
       if (isSplitMode) {
@@ -465,6 +473,19 @@ class BrowserProvider extends ChangeNotifier {
         splitTabIndices = splitTabIndices.map((i) => i > index ? i - 1 : i).toList();
         if (splitTabIndices.length < 2) { isSplitMode = false; splitTabIndices.clear(); }
       }
+
+      // Update password integration indices for remaining tabs
+      final updatedIntegrations = <int, PasswordWebViewIntegration>{};
+      _passwordIntegrations.forEach((tabIndex, integration) {
+        if (tabIndex > index) {
+          updatedIntegrations[tabIndex - 1] = integration;
+        } else if (tabIndex < index) {
+          updatedIntegrations[tabIndex] = integration;
+        }
+      });
+      _passwordIntegrations.clear();
+      _passwordIntegrations.addAll(updatedIntegrations);
+
       _updateState();
       notifyListeners();
     } else {
@@ -977,6 +998,50 @@ class BrowserProvider extends ChangeNotifier {
     _loadData();
     notifyListeners();
   }
+
+  // ============================================================================
+  // PASSWORD INTEGRATION METHODS
+  // ============================================================================
+
+  Future<void> _setupPasswordIntegration(
+    InAppWebViewController controller,
+    int tabIndex,
+    BuildContext context,
+  ) async {
+    try {
+      final syncService = Provider.of<SyncService>(context, listen: false);
+      final integration = PasswordWebViewIntegration(
+        syncService: syncService,
+        context: context,
+        accentColor: neonColor,
+        webViewController: controller,
+      );
+
+      _passwordIntegrations[tabIndex] = integration;
+      await integration.initialize(controller);
+    } catch (e) {
+      debugPrint('Error setting up password integration: $e');
+    }
+  }
+
+  Future<void> _handlePasswordPageLoad(
+    InAppWebViewController controller,
+    String url,
+    int tabIndex,
+  ) async {
+    try {
+      final integration = _passwordIntegrations[tabIndex];
+      if (integration != null) {
+        await integration.onLoadStop(url, controller);
+      }
+    } catch (e) {
+      debugPrint('Error handling password page load: $e');
+    }
+  }
+
+  void _cleanupPasswordIntegration(int tabIndex) {
+    _passwordIntegrations.remove(tabIndex);
+  }
 }
 
 class AiAgentProvider extends ChangeNotifier {
@@ -1203,13 +1268,17 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
       initialUrlRequest: URLRequest(url: WebUri(tab.url)),
       initialSettings: browser.getSettings(tabIndex),
       pullToRefreshController: isSplit ? null : _pullToRefreshController,
-      onWebViewCreated: (c) => browser.setController(c, tabIndex),
+      onWebViewCreated: (c) async {
+        browser.setController(c, tabIndex);
+        await browser._setupPasswordIntegration(c, tabIndex, context);
+      },
       onLoadStart: (c, url) { browser.tabs[tabIndex].loadStartTime = DateTime.now(); browser.updateUrl(url.toString(), tabIndex); },
       onLoadStop: (c, url) async {
         if (tabIndex == browser.currentTabIndex) browser.progress = 1.0;
         browser.updateUrl(url.toString(), tabIndex);
         browser.tabs[tabIndex].title = await c.getTitle() ?? "Unknown";
         browser.injectScripts(c);
+        await browser._handlePasswordPageLoad(c, url.toString(), tabIndex);
         browser.addToHistory(url.toString(), browser.tabs[tabIndex].title, tabIndex);
         if (tabIndex == browser.currentTabIndex) browser.updateSSL(await c.getCertificate());
         browser.notifyListeners();
@@ -1635,6 +1704,10 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
 
             // Sync & Account Section
             _buildSyncAccountTile(context, b),
+            const SizedBox(height: 8),
+
+            // Password Manager
+            _buildPasswordManagerTile(context, b),
             const SizedBox(height: 16),
 
             _settingsSection("Privacy & Security", b),
@@ -1864,6 +1937,48 @@ class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderSt
             context,
             MaterialPageRoute(
               builder: (_) => SyncSettingsPage(
+                syncService: syncService,
+                accentColor: b.neonColor,
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildPasswordManagerTile(BuildContext context, BrowserProvider b) {
+    final syncService = Provider.of<SyncService>(context, listen: false);
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: b.neonColor.withOpacity(0.3)),
+      ),
+      child: ListTile(
+        leading: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: b.neonColor.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Icon(Iconsax.key, color: b.neonColor, size: 20),
+        ),
+        title: const Text(
+          "Password Manager",
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w500),
+        ),
+        subtitle: const Text(
+          "Manage and sync your saved passwords",
+          style: TextStyle(color: Colors.grey, fontSize: 12),
+        ),
+        trailing: const Icon(Icons.chevron_right, color: Colors.white54),
+        onTap: () {
+          Navigator.pop(context);
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => PasswordManagerPage(
                 syncService: syncService,
                 accentColor: b.neonColor,
               ),
