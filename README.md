@@ -5,7 +5,7 @@
 ![Luxor Browser](https://img.shields.io/badge/Luxor-Browser-FFD700?style=for-the-badge&logo=safari&logoColor=white)
 ![Flutter](https://img.shields.io/badge/Flutter-3.2+-02569B?style=for-the-badge&logo=flutter)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
-![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android)
+![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Linux-3DDC84?style=for-the-badge&logo=android)
 
 **A Luxury, Privacy-Focused Mobile Browser with AI Integration**
 
@@ -86,15 +86,16 @@
 
 ### Prerequisites
 - Flutter SDK 3.2 or higher
-- Android SDK (API level 21+)
+- Android SDK (API level 21+) for Android builds
+- Linux build dependencies for Linux builds
 - Git
 
 ### Build from Source
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/zesbe/ai-browser-flutter.git
-   cd ai-browser-flutter
+   git clone https://github.com/zesbe/luxor-browser.git
+   cd luxor-browser
    ```
 
 2. **Install dependencies**
@@ -104,19 +105,47 @@
 
 3. **Run the app**
    ```bash
+   # Android
    flutter run
+
+   # Linux Desktop
+   flutter run -d linux
    ```
 
-4. **Build APK**
+4. **Build APK (Android)**
    ```bash
    flutter build apk --release
    ```
-
    The APK will be available at `build/app/outputs/flutter-apk/app-release.apk`
 
-### Download Pre-built APK
+5. **Build for Linux (Mint/Ubuntu/Debian)**
+   ```bash
+   # Install dependencies first
+   sudo apt-get install -y ninja-build libgtk-3-dev libwebkit2gtk-4.1-dev
 
-Download the latest release from [GitHub Releases](https://github.com/zesbe/ai-browser-flutter/releases)
+   # Enable Linux desktop
+   flutter config --enable-linux-desktop
+
+   # Build
+   flutter build linux --release
+   ```
+   The binary will be available at `build/linux/x64/release/bundle/luxor_browser`
+
+### Download Pre-built Releases
+
+Download the latest release from [GitHub Releases](https://github.com/zesbe/luxor-browser/releases)
+
+#### Linux Installation (Mint/Ubuntu/Debian)
+```bash
+# Download and extract
+tar -xzf luxor-browser-linux-x64.tar.gz
+
+# Install runtime dependencies
+sudo apt install libgtk-3-0 libwebkit2gtk-4.1-0
+
+# Run
+./luxor_browser
+```
 
 ---
 
@@ -213,11 +242,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [x] User Agent switcher
 - [x] Download manager
 - [x] AI integration
+- [x] Sync across devices (Google Account)
+- [x] Password Manager with Import/Export
+- [x] Linux Desktop version (Mint/Ubuntu/Debian)
 - [ ] PWA support
 - [ ] Extension system
-- [ ] Sync across devices
 - [ ] iOS support
-- [ ] Desktop version
+- [ ] Windows Desktop version
+- [ ] macOS Desktop version
 
 ---
 

@@ -36,6 +36,9 @@ dependencies:
   file_picker: ^8.0.0+1
   credential_manager: ^2.0.2
   csv: ^6.0.0
+  # Linux Desktop Support
+  window_manager: ^0.3.9
+  desktop_webview_window: ^0.2.3
 
 dev_dependencies:
   flutter_test:
