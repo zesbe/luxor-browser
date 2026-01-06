@@ -383,9 +383,15 @@ class BrowserProvider extends ChangeNotifier {
   }
 
   Future<void> _initTts() async {
-    await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setSpeechRate(0.5);
-    _flutterTts.setCompletionHandler(() { isSpeaking = false; notifyListeners(); });
+    // TTS only works on mobile platforms
+    if (!Platform.isAndroid && !Platform.isIOS) return;
+    try {
+      await _flutterTts.setLanguage("en-US");
+      await _flutterTts.setSpeechRate(0.5);
+      _flutterTts.setCompletionHandler(() { isSpeaking = false; notifyListeners(); });
+    } catch (e) {
+      debugPrint('TTS init failed: $e');
+    }
   }
 
   Future<void> _loadData() async {
@@ -1085,24 +1091,30 @@ class BrowserHomePage extends StatefulWidget { const BrowserHomePage({super.key}
 class _BrowserHomePageState extends State<BrowserHomePage> with TickerProviderStateMixin, WidgetsBindingObserver {
   late AnimationController _menuController;
   late Animation<double> _menuScale;
-  late PullToRefreshController _pullToRefreshController;
+  PullToRefreshController? _pullToRefreshController;
+
+  bool get _isMobile => Platform.isAndroid || Platform.isIOS;
 
   @override void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _menuController = AnimationController(vsync: this, duration: const Duration(milliseconds: 150));
     _menuScale = CurvedAnimation(parent: _menuController, curve: Curves.easeOutBack);
-    _pullToRefreshController = PullToRefreshController(
-      settings: PullToRefreshSettings(color: const Color(0xFFFFD700), backgroundColor: Colors.black),
-      onRefresh: () async {
-        final b = Provider.of<BrowserProvider>(context, listen: false);
-        if (b.currentTab.url != "luxor://home") b.reload();
-        _pullToRefreshController.endRefreshing();
-      }
-    );
+    // PullToRefresh only works on mobile platforms
+    if (_isMobile) {
+      _pullToRefreshController = PullToRefreshController(
+        settings: PullToRefreshSettings(color: const Color(0xFFFFD700), backgroundColor: Colors.black),
+        onRefresh: () async {
+          final b = Provider.of<BrowserProvider>(context, listen: false);
+          if (b.currentTab.url != "luxor://home") b.reload();
+          _pullToRefreshController?.endRefreshing();
+        }
+      );
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final browser = Provider.of<BrowserProvider>(context, listen: false);
-      if (browser.isBiometricEnabled && browser.isLocked) browser.checkBiometricLock(context);
+      // Biometric lock only on mobile
+      if (_isMobile && browser.isBiometricEnabled && browser.isLocked) browser.checkBiometricLock(context);
     });
   }
 
